@@ -140,4 +140,7 @@
 #define STACK_ALARM         4096
 #define STACK_LOGGER        4096
 #define STACK_MODBUS        4096
-#define STACK_WEB           4096
+/* The config handlers hold a whole app_config_t working copy (~1 KB) on
+ * the stack while cJSON recurses over the request body, so the HTTP task
+ * needs noticeably more headroom than the other network tasks. */
+#define STACK_WEB           8192

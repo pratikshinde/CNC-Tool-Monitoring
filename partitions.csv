@@ -3,8 +3,13 @@
 # Budget rationale (SRS HW-D2):
 #   Dual OTA is mandatory for safe rollback (OTA-R2), which costs 2x the app
 #   slot. The web UI assets live in their own read-only LittleFS partition so
-#   they can be updated independently of the firmware (OTA-R4) and so a UI
-#   update can never corrupt the log store. Logs get everything left over.
+#   they can be updated independently of the firmware (OTA-R4).
+#
+# No `logs` partition: on-device data logging (LG-R1…R7) has been dropped —
+# flash budget doesn't support holding a useful amount of history, and the
+# 5-minute RAM trend buffer (trend.c) covers the "what just happened" case
+# this device actually needs. If durable history is wanted later, it belongs
+# off-device (Modbus/MQTT to a PLC or historian), not on this flash.
 #
 # Name        Type  SubType   Offset     Size       Notes
 #
@@ -21,7 +26,6 @@ factory_cal,  data, nvs,      0x12000,   0x4000,
 ota_0,        app,  ota_0,    0x20000,   0x200000,
 # 2 MB
 ota_1,        app,  ota_1,    0x220000,  0x200000,
-# 512 KB gzipped SPA (UI-R2 budget 250 KB)
+# 512 KB gzipped SPA (UI-R2 budget 250 KB). Everything past this to the end
+# of flash (~11.4 MB) is presently unallocated.
 web,          data, littlefs, 0x420000,  0x80000,
-# ~11.4 MB tiered log store (LG-R7)
-logs,         data, littlefs, 0x4A0000,  0xB60000,

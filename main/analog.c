@@ -81,8 +81,10 @@ static ads1115_t              *s_adc;
 static SemaphoreHandle_t       s_adc_mutex;
 static bool                    s_healthy;
 
-/* Per-spindle measured DC bias, refreshed by auto-zero. Seeded from the
- * nominal so the first readings before any calibration are sane. */
+/* Per-spindle measured DC bias, refreshed by auto-zero. Seeded at init
+ * from the stored calibration (current.zero_offset_v) so a tare performed
+ * during commissioning survives a power cycle; falls back to the nominal
+ * from board.h for a device that has never been zeroed. */
 static float s_bias_v[NUM_SPINDLES] = { CT_BIAS_VOLTS, CT_BIAS_VOLTS };
 
 static const uint8_t k_current_ch[NUM_SPINDLES]  = {
@@ -96,10 +98,20 @@ static const uint8_t k_pressure_ch[NUM_SPINDLES] = {
  * Init
  * ============================================================ */
 
-esp_err_t analog_init(void)
+esp_err_t analog_init(const app_config_t *cfg)
 {
     s_adc_mutex = xSemaphoreCreateMutex();
     if (!s_adc_mutex) return ESP_ERR_NO_MEM;
+
+    /* Restore the stored zero reference. A bias of zero means the field has
+     * never been written (a fresh config), so keep the board nominal rather
+     * than trusting a value that would make every reading wrong. */
+    if (cfg) {
+        for (int i = 0; i < NUM_SPINDLES; i++) {
+            float stored = cfg->spindle[i].current.zero_offset_v;
+            if (stored > 0.0f) s_bias_v[i] = stored;
+        }
+    }
 
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port          = I2C_PORT_NUM,

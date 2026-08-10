@@ -14,6 +14,9 @@ idf_component_register(
          "wifi.c"
          "modbus.c"
          "web.c"
+         "calib.c"
+         "trend.c"
+         "ota.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES "web/index.html"
     REQUIRES esp_driver_i2c

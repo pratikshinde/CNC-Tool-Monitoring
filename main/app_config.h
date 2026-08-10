@@ -22,7 +22,7 @@ extern "C" {
 
 /* Bump on any layout change. config_store refuses to load a blob whose
  * version it does not understand, and falls back to defaults. */
-#define CONFIG_SCHEMA_VERSION   5
+#define CONFIG_SCHEMA_VERSION   7
 
 #define CFG_NAME_LEN            24
 #define CFG_UNIT_LEN            8
@@ -105,6 +105,15 @@ typedef struct {
     float ct_secondary_ma;   /* CT output at rated primary, e.g. 50 mA        */
     float gain_correction;   /* field calibration multiplier, nominal 1.0     */
     float zero_offset_v;     /* measured bias, refreshed by auto-zero (AI-R7) */
+
+    /* Readings below this report exactly zero.
+     *
+     * An RMS is the square root of a sum of squares, so it is always
+     * positive — with no load, what comes out is the RMS of the noise
+     * floor, not zero. Without a deadband an idle spindle reads a small
+     * non-zero current forever, which looks like a fault to an operator
+     * and defeats any LoLo band set near zero. */
+    float noload_cutoff_a;
 
     /* Number of ADC samples in one RMS burst. See analog.c for the accuracy
      * trade-off this controls — it is the single most consequential number
@@ -222,7 +231,6 @@ typedef struct {
 
 typedef struct {
     uint16_t     measure_period_ms;   /* acquisition cycle, default 100 (10 Hz) */
-    uint16_t     log_interval_s;      /* 1..3600 (LG-R1)                        */
     uint8_t      mains_hz;            /* 50 or 60 — sets the RMS burst window   */
 
     wifi_cfg_t   wifi;

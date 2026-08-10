@@ -32,6 +32,14 @@ typedef struct {
     float           pressure;
     float           rpm;
 
+    /* Pre-scaling values, republished so the calibration screen can show
+     * what it is actually working from and so calib.c can recompute an
+     * uncorrected engineering value without going back to the ADC and
+     * contending with the measurement loop for the bus. */
+    float           burden_vrms;
+    float           pressure_adc_volts;
+    float           pressure_loop_ma;
+
     sensor_status_t current_status;
     sensor_status_t pressure_status;
     bool            rpm_sensor_suspect;  /* current flowing, no pulses */

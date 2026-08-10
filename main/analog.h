@@ -35,9 +35,11 @@ typedef struct {
     sensor_status_t status;
 } pressure_reading_t;
 
-/* Bring up the I2C bus and the ADS1115. Fails if the ADC does not
- * respond, because everything downstream is meaningless without it. */
-esp_err_t analog_init(void);
+/* Bring up the I2C bus and the ADS1115, seeding each channel's zero
+ * reference from the stored calibration so a previous auto-zero survives a
+ * reboot. Fails if the ADC does not respond, because everything downstream
+ * is meaningless without it. */
+esp_err_t analog_init(const app_config_t *cfg);
 
 /* True once the ADC has been probed successfully. The diagnostics layer
  * polls this to distinguish "no data yet" from "hardware missing". */

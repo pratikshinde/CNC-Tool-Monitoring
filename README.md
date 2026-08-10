@@ -15,14 +15,16 @@ Requirements and plan: [`SRS_CNC_Tool_Monitor.md`](../SRS_CNC_Tool_Monitor.md) �
 
 Phase 1–3 core is implemented: configuration, drivers, spindle state
 machine, alarm engine and digital output mapping. Networking (WiFi,
-Modbus RTU/TCP, a settings + telemetry web page) is implemented. Data
-logging, OTA logic and the full Phase 4 SPA are not written yet.
+Modbus RTU/TCP), a multi-tab web UI (dashboard, live trend graph,
+thresholds, guided calibration, comms, system/OTA) and browser-upload OTA
+are all implemented. On-device data logging has been **dropped** — see
+below — and the full Phase 4 Material UI SPA remains unbuilt.
 
 | Area | State |
 |---|---|
 | Config store with known-good rollback | done |
-| ADS1115 / analogue acquisition | done, see accuracy caveat below |
-| RPM via PCNT | done |
+| ADS1115 / analogue acquisition | done, bench-verified, see accuracy caveat below |
+| RPM via PCNT | done, bench-verified (tachometer cross-check pending) |
 | Digital I/O with safe-state and pulse stretching | done |
 | Spindle state machine | done, host-tested |
 | Alarm engine: bands, delays, hysteresis, latching | done, host-tested |
@@ -30,13 +32,24 @@ logging, OTA logic and the full Phase 4 SPA are not written yet.
 | Digital output mapping | done, host-tested |
 | WiFi (station + always-on fallback AP) | done |
 | Modbus RTU (RS485) + Modbus TCP, read-only telemetry registers | done |
-| Web UI: WiFi/Modbus settings + 1 Hz live readout | done, not the Phase 4 SPA |
-| Data logging | not started (Phase 3 remainder) |
-| OTA | partition layout ready, logic not started (Phase 7) |
+| Guided 2-point calibration (pressure) + 1-point + auto-zero (current) | done |
+| No-load current deadband | done |
+| Web UI: dashboard, trends, thresholds, calibration, comms, system | done, not the Phase 4 SPA |
+| OTA: browser-upload firmware update, project/version checked | done |
+| On-device data logging | **dropped** — flash budget does not support it |
 
 **Compiles clean against ESP-IDF v6.0.2.** `idf.py build` passes with zero
-warnings on a full rebuild of the `main` component. Not yet bench-tested
-against real hardware — see [Next steps](#next-steps).
+warnings on a full rebuild of the `main` component.
+
+### Data logging has been dropped
+
+On-device logging to a `logs` LittleFS partition (originally LG-R1…R7) is
+no longer planned: the flash budget doesn't support holding a useful
+amount of history. The 5-minute RAM trend buffer (`trend.c`) covers "what
+just happened" on the dashboard; it does not survive a reboot and is not a
+replacement for durable history. If long-term trending is needed later, it
+belongs off-device — pull it over Modbus/TCP into a PLC or historian —
+rather than on this flash.
 
 ---
 
@@ -87,8 +100,12 @@ main/
   monitor.[ch]     the real-time task
   wifi.[ch]        STA + always-on fallback AP
   modbus.[ch]      Modbus RTU (RS485) and TCP slaves, read-only registers
-  web.[ch]         HTTP server: settings API + telemetry API
-  web/index.html   the settings + live-readout page (embedded in firmware)
+  calib.[ch]       guided field calibration (2-point pressure, 1-point CT, auto-zero)
+  trend.[ch]       5-minute RAM ring buffer for the live graph (not persisted)
+  ota.[ch]         browser-upload firmware update into the spare OTA slot
+  web.[ch]         HTTP server: dashboard/trend/threshold/calibration/comms/
+                   system API, ~15 routes
+  web/index.html   the multi-tab operator UI (embedded in firmware)
   main.c           bring-up
 host_test/         gcc test harness
 ```
@@ -180,15 +197,19 @@ PLC.
 
 ## Next steps
 
-1. Bench-verify on real hardware: I2C bring-up, ADS1115 probe, PCNT counts
-   against a signal generator, all four DOs into a PLC input, and the RS485
-   transceiver against a Modbus RTU master.
-2. Characterise the analogue noise floor **with the VFD running** — this
+1. **Fix the pressure burden resistor** (180 Ω → 100 Ω) — see Hardware
+   notes. This is the highest-priority open item: it's a fault-detection
+   gap on hardware currently on the bench, not a someday cleanup.
+2. Cross-check RPM against a tachometer — CT, pressure and RPM are bench-
+   verified, but RPM showed minor variation worth confirming independently.
+3. Characterise the analogue noise floor **with the VFD running** — this
    is the measurement that decides whether HW-D1 needs resolving before
    anything else proceeds.
-3. Data logger against the `logs` partition (LG-R1 … LG-R7).
-4. The full Material UI SPA (Phase 4) — the current web UI is a
-   settings-and-telemetry page, not the dashboard the roadmap describes.
+4. Decide on authentication for the web UI before it goes on a shop
+   network — OTA upload means anyone who can reach the device can reflash
+   it, and there is currently no login.
+5. The full Material UI SPA (Phase 4) — the current web UI is a hand-
+   written multi-tab page, not the dashboard the roadmap describes.
 
 ---
 
@@ -203,9 +224,26 @@ PLC.
   - Configured for **30:1** CT ratio (30 A primary / 1 A secondary).
   - Fitted burden resistor: **0.1 Ω** with an opamp gain stage.
   - CT reference bias voltage: nominal **1.65 V**.
-- **Pressure Measurement**:
+- **Pressure Measurement — known issue, not yet resolved**:
   - 4–20 mA pressure loop across a **180 Ω** burden resistor (range 0–250 bar).
-  - Sampled using `ADS_FSR_4096` (±4.096 V range) to support full 0.72 V – 3.60 V input span without ADC saturation.
+    At the full 20 mA scale that is **3.6 V**, which exceeds the ESP32's
+    3.3 V supply rail feeding the ADS1115 — the input pin sees more than
+    VDD regardless of any PGA/FSR setting.
+  - Pressure reads use `ADS_FSR_4096` (±4.096 V), which avoids the ADC
+    *digital* code saturating at max-scale, but that only hides the
+    symptom: it does not change the pin's absolute voltage limit
+    (`ads1115.h` itself documents `ADS_FSR_4096` as "not usable at 3V3").
+    A signal genuinely above VDD is an over-voltage condition on the ADC
+    input regardless of which range is selected.
+  - Consequence: the NAMUR over-range fault check in `scaling.c`
+    (`LOOP_OVER_MA = 21.0f`) cannot be trusted near or above this clipping
+    point — a shorted transmitter driving max loop current may not read as
+    a fault. The reachable top ~10% of the 250 bar range is also suspect.
+  - **Fix is a board change, not firmware**: drop the burden to 100 Ω
+    (0.4–2.0 V across the 4–20 mA range, 2.1 V at the 21 mA over-range
+    trip point — comfortably inside the 3.3 V rail with headroom) and
+    revert pressure sampling to `ADS_FSR_2048`, matching the current
+    channels.
 - DI0/DI1 are GPIO34/35, which are **input-only with no internal
   pull-ups**. External 10 kΩ pull-ups to 3V3 are required on the PCB or
   the pulse counter will pick up noise on a floating pin.

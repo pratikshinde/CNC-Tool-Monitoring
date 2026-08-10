@@ -119,8 +119,9 @@ static void test_current_scaling(void)
         .gain_correction = 1.0f,
     };
 
-    /* 50 A primary -> 50 mA secondary -> 50 mA * 33 R = 1.65 V across
-     * the burden. */
+    /* 50 A primary -> 50 mA secondary -> 50 mA across the fitted burden.
+     * Derived from CT_BURDEN_OHM rather than hard-coded, so this test does
+     * not have to change when the board's burden resistor does. */
     float vrms_at_full = 0.050f * CT_BURDEN_OHM;
     CHECK(CLOSE(current_scale(&cfg, vrms_at_full), 50.0f, 0.01f),
           "full scale should be 50 A, got %.3f", current_scale(&cfg, vrms_at_full));
@@ -145,6 +146,39 @@ static void test_current_scaling(void)
     cfg.ct_secondary_ma = 0.0f;
     CHECK(current_scale(&cfg, vrms_at_full) == 0.0f,
           "zero secondary rating must not produce inf/nan");
+
+    /* --- No-load cutoff ----------------------------------------------
+     * The noise floor of an RMS is always positive, so without a deadband
+     * an idle spindle never reads zero. This is the fix for the ~0.02 A
+     * observed at no load on the bench. */
+    current_cfg_t dead = {
+        .ct_primary_amps  = 50.0f,
+        .ct_secondary_ma  = 50.0f,
+        .gain_correction  = 1.0f,
+        .noload_cutoff_a  = 0.5f,
+    };
+
+    /* 0.2 A of noise is below the 0.5 A deadband -> exactly zero. */
+    float vrms_noise = (0.2f / 50.0f) * 0.050f * CT_BURDEN_OHM;
+    CHECK(current_scale(&dead, vrms_noise) == 0.0f,
+          "a reading below the cutoff must be exactly zero, got %.4f",
+          current_scale(&dead, vrms_noise));
+
+    /* Real load well above the deadband passes through unchanged. */
+    CHECK(CLOSE(current_scale(&dead, vrms_at_full), 50.0f, 0.01f),
+          "a reading far above the cutoff must be unaffected");
+
+    /* The deadband must suppress and not merely subtract: a value just
+     * above the threshold keeps its full magnitude rather than being
+     * shifted down by the cutoff. */
+    float vrms_just_over = (0.6f / 50.0f) * 0.050f * CT_BURDEN_OHM;
+    CHECK(CLOSE(current_scale(&dead, vrms_just_over), 0.6f, 0.01f),
+          "just above the cutoff must read its true value, not value-cutoff");
+
+    /* A zero cutoff disables the deadband entirely. */
+    dead.noload_cutoff_a = 0.0f;
+    CHECK(current_scale(&dead, vrms_noise) > 0.0f,
+          "a zero cutoff must leave small readings alone");
 }
 
 static void test_rpm_scaling(void)
@@ -257,6 +291,28 @@ static void test_config_validation(void)
     app_config_seal(&bad);
     CHECK(app_config_validate(&bad, NULL) == CFG_OK,
           "a disabled spindle's bad settings must not block the save");
+
+    /* No-load cutoff: a deadband may swallow the noise floor, but must not
+     * be allowed to hide real cutting current. */
+    bad = cfg;
+    bad.spindle[0].current.noload_cutoff_a = -0.1f;
+    app_config_seal(&bad);
+    CHECK(app_config_validate(&bad, NULL) == CFG_ERR_CT_RANGE,
+          "a negative no-load cutoff must be rejected");
+
+    bad = cfg;
+    bad.spindle[0].current.noload_cutoff_a =
+        bad.spindle[0].current.ct_primary_amps * 0.5f;
+    app_config_seal(&bad);
+    CHECK(app_config_validate(&bad, NULL) == CFG_ERR_CT_RANGE,
+          "a cutoff at 50% of CT rating must be rejected (would hide real load)");
+
+    bad = cfg;
+    bad.spindle[0].current.noload_cutoff_a =
+        bad.spindle[0].current.ct_primary_amps * 0.05f;
+    app_config_seal(&bad);
+    CHECK(app_config_validate(&bad, NULL) == CFG_OK,
+          "a cutoff at exactly 5% of CT rating must be accepted");
 
     /* --- Modbus ------------------------------------------------------- */
 

@@ -34,6 +34,7 @@
 #include "modbus.h"
 #include "monitor.h"
 #include "rpm.h"
+#include "trend.h"
 #include "web.h"
 #include "wifi.h"
 
@@ -141,7 +142,7 @@ void app_main(void)
 
     /* --- 3. Analogue front end --------------------------------------- */
 
-    esp_err_t err = analog_init();
+    esp_err_t err = analog_init(cfg);
     if (err != ESP_OK) {
         /* Deliberately not fatal. A device that reboots in a loop because
          * the ADC is unplugged is far harder to diagnose in a cabinet than
@@ -166,6 +167,7 @@ void app_main(void)
      * All on CORE_NETWORK. A WiFi or HTTP fault here must not be able to
      * touch the real-time loop or the outputs it already released above. */
 
+    ESP_ERROR_CHECK(trend_start());
     ESP_ERROR_CHECK(wifi_init(cfg));
     ESP_ERROR_CHECK(modbus_init(cfg));
     ESP_ERROR_CHECK(web_init(cfg));

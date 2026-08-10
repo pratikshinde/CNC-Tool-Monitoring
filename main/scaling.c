@@ -82,7 +82,15 @@ float current_scale(const current_cfg_t *cfg, float burden_vrms)
     /* Current is a magnitude; a negative result means the zero reference
      * drifted above the signal, which is a calibration problem rather than
      * a negative current. Report zero and let auto-zero fix it. */
-    return (amps > 0.0f) ? amps : 0.0f;
+    if (amps <= 0.0f) return 0.0f;
+
+    /* No-load deadband. Suppress rather than subtract: a reading just above
+     * the threshold must keep its true magnitude, otherwise every value in
+     * the working range would be shifted down by the cutoff and the CT
+     * calibration would be quietly wrong everywhere. */
+    if (amps < cfg->noload_cutoff_a) return 0.0f;
+
+    return amps;
 }
 
 /* ============================================================

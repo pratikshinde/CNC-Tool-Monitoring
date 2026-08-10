@@ -101,6 +101,10 @@ static void default_spindle(spindle_cfg_t *s, int index)
     s->current.ct_secondary_ma   = 1000.0f;
     s->current.gain_correction   = 0.506f;
     s->current.zero_offset_v     = CT_BIAS_VOLTS;
+    /* 0.05 A on a 30 A CT is ~0.17% of full scale — comfortably above the
+     * observed ~0.02 A no-load noise floor, and far below any current a
+     * real cut would draw. */
+    s->current.noload_cutoff_a   = 0.05f;
     s->current.rms_burst_samples = 128;
 
     /* --- Pressure: 0-250 bar transmitter on a 4-20 mA loop across 180R shunt. */
@@ -152,7 +156,6 @@ void app_config_set_defaults(app_config_t *cfg)
     cfg->schema_version = CONFIG_SCHEMA_VERSION;
 
     cfg->system.measure_period_ms = 100;   /* 10 Hz — NFR-1 budget */
-    cfg->system.log_interval_s    = 5;
     cfg->system.mains_hz          = 50;
 
     /* WiFi STA left blank: the device relies on its always-on fallback AP
@@ -222,9 +225,6 @@ cfg_result_t app_config_validate(const app_config_t *cfg, uint8_t *which)
     if (cfg->system.measure_period_ms < 20 || cfg->system.measure_period_ms > 1000) {
         return CFG_ERR_PERIOD_RANGE;
     }
-    if (cfg->system.log_interval_s < 1 || cfg->system.log_interval_s > 3600) {
-        return CFG_ERR_PERIOD_RANGE;
-    }
     if (cfg->system.mains_hz != 50 && cfg->system.mains_hz != 60) {
         return CFG_ERR_MAINS_HZ;
     }
@@ -254,6 +254,15 @@ cfg_result_t app_config_validate(const app_config_t *cfg, uint8_t *which)
         if (s->current.ct_primary_amps <= 0.0f ||
             s->current.ct_secondary_ma <= 0.0f ||
             s->current.gain_correction <= 0.0f) {
+            return CFG_ERR_CT_RANGE;
+        }
+
+        /* A deadband is meant to swallow the noise floor, nothing more. Cap
+         * it at 5% of the CT rating: beyond that it would start hiding real
+         * cutting current, and a monitor that silently reports zero while
+         * the tool is loaded is worse than one that reads a little noise. */
+        if (s->current.noload_cutoff_a < 0.0f ||
+            s->current.noload_cutoff_a > s->current.ct_primary_amps * 0.05f) {
             return CFG_ERR_CT_RANGE;
         }
 
