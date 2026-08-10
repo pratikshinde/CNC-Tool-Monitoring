@@ -1,0 +1,27 @@
+# CNC Tool Monitor — 16 MB flash partition layout
+#
+# Budget rationale (SRS HW-D2):
+#   Dual OTA is mandatory for safe rollback (OTA-R2), which costs 2x the app
+#   slot. The web UI assets live in their own read-only LittleFS partition so
+#   they can be updated independently of the firmware (OTA-R4) and so a UI
+#   update can never corrupt the log store. Logs get everything left over.
+#
+# Name        Type  SubType   Offset     Size       Notes
+#
+# The generator only accepts whole-line comments (a line starting with #),
+# not a trailing note after real fields — anything past the Size column on
+# a data line is parsed as the Flags field. So notes live on the line above
+# rather than at the end of each row.
+nvs,          data, nvs,      0x9000,    0x6000,
+otadata,      data, ota,      0xf000,    0x2000,
+phy_init,     data, phy,      0x11000,   0x1000,
+# calibration + serial, never factory-reset
+factory_cal,  data, nvs,      0x12000,   0x4000,
+# 2 MB
+ota_0,        app,  ota_0,    0x20000,   0x200000,
+# 2 MB
+ota_1,        app,  ota_1,    0x220000,  0x200000,
+# 512 KB gzipped SPA (UI-R2 budget 250 KB)
+web,          data, littlefs, 0x420000,  0x80000,
+# ~11.4 MB tiered log store (LG-R7)
+logs,         data, littlefs, 0x4A0000,  0xB60000,

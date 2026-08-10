@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CNC Tool Monitor</title>
+<style>
+  :root {
+    --bg: #0f1418; --panel: #171f26; --border: #2a343d; --text: #e6edf3;
+    --muted: #8b98a5; --accent: #4da3ff; --ok: #3fb950; --warn: #d29922; --alarm: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: none; }
+  .row .k { color: var(--muted); }
+  .row .v { font-variant-numeric: tabular-nums; text-align: right; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: rgba(63,185,80,.15); color: var(--ok); }
+  .badge.warn { background: rgba(210,153,34,.15); color: var(--warn); }
+  .badge.alarm { background: rgba(248,81,73,.15); color: var(--alarm); }
+  .badge.muted { background: rgba(139,152,165,.15); color: var(--muted); }
+  form .field { margin-bottom: 12px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input, select {
+    width: 100%; padding: 7px 9px; background: #0d1318; border: 1px solid var(--border);
+    color: var(--text); border-radius: 5px; font-size: 14px;
+  }
+  input[type="checkbox"] { width: auto; }
+  .checkline { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .checkline label { margin: 0; color: var(--text); font-size: 14px; }
+  fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 16px; padding: 12px; }
+  legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  button {
+    background: var(--accent); color: #04121f; border: none; border-radius: 6px;
+    padding: 9px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button:active { opacity: .8; }
+  #save-status { margin-top: 10px; font-size: 13px; min-height: 18px; }
+  #save-status.err { color: var(--alarm); }
+  #save-status.ok { color: var(--ok); }
+</style>
+</head>
+<body>
+
+<h1>CNC Tool Monitor</h1>
+<div class="sub">Live telemetry and comms configuration</div>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>System</h2>
+    <div id="system-rows"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Connectivity</h2>
+    <div id="net-rows"></div>
+  </div>
+
+  <div class="panel" id="spindle-panels"></div>
+
+  <div class="panel">
+    <h2>WiFi</h2>
+    <form id="wifi-form">
+      <div class="field">
+        <label for="wifi-ssid">Station SSID</label>
+        <input id="wifi-ssid" name="ssid" maxlength="31" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="wifi-pass">Station Password</label>
+        <input id="wifi-pass" name="password" type="password" maxlength="63" autocomplete="new-password" placeholder="leave blank to keep current">
+      </div>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Modbus</h2>
+    <form id="modbus-form">
+      <fieldset>
+        <legend>RTU (RS485)</legend>
+        <div class="checkline">
+          <input type="checkbox" id="mb-rtu-enabled" name="rtu_enabled">
+          <label for="mb-rtu-enabled">Enabled</label>
+        </div>
+        <div class="two-col">
+          <div class="field">
+            <label for="mb-baud">Baud rate</label>
+            <select id="mb-baud" name="baud">
+              <option value="1200">1200</option>
+              <option value="2400">2400</option>
+              <option value="4800">4800</option>
+              <option value="9600">9600</option>
+              <option value="19200">19200</option>
+              <option value="38400">38400</option>
+              <option value="57600">57600</option>
+              <option value="115200">115200</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="mb-parity">Parity</label>
+            <select id="mb-parity" name="parity">
+              <option value="0">None</option>
+              <option value="1">Odd</option>
+              <option value="2">Even</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="mb-stop">Stop bits</label>
+            <select id="mb-stop" name="stop_bits">
+              <option value="1">1</option>
+              <option value="2">2</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="mb-data">Data bits</label>
+            <select id="mb-data" name="data_bits">
+              <option value="8">8</option>
+              <option value="7">7</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="mb-slave">Slave ID (1&ndash;247)</label>
+          <input id="mb-slave" name="slave_id" type="number" min="1" max="247">
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>TCP</legend>
+        <div class="checkline">
+          <input type="checkbox" id="mb-tcp-enabled" name="tcp_enabled">
+          <label for="mb-tcp-enabled">Enabled</label>
+        </div>
+        <div class="field">
+          <label for="mb-port">Port</label>
+          <input id="mb-port" name="tcp_port" type="number" min="1" max="65535">
+        </div>
+      </fieldset>
+    </form>
+  </div>
+
+</div>
+
+<div class="panel" style="margin-top:16px">
+  <button id="save-btn">Save settings</button>
+  <div id="save-status"></div>
+</div>
+
+<script>
+const SEVERITY_CLASS = {
+  'none': 'ok', 'diagnostic': 'warn', 'wear trend': 'warn', 'warning': 'warn',
+  'alarm': 'alarm', 'tool breakage': 'alarm', 'crash': 'alarm'
+};
+
+function el(tag, cls, text) {
+  const e = document.createElement('div');
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function row(k, vText, badgeClass) {
+  const r = el('div', 'row');
+  r.appendChild(el('div', 'k', k));
+  if (badgeClass) {
+    const v = el('div', 'v');
+    const b = el('span', 'badge ' + badgeClass, vText);
+    v.appendChild(b);
+    r.appendChild(v);
+  } else {
+    r.appendChild(el('div', 'v', vText));
+  }
+  return r;
+}
+
+function renderTelemetry(t) {
+  const sys = document.getElementById('system-rows');
+  sys.innerHTML = '';
+  sys.appendChild(row('System', t.system_healthy ? 'healthy' : 'FAULT', t.system_healthy ? 'ok' : 'alarm'));
+  sys.appendChild(row('ADC', t.adc_healthy ? 'ok' : 'FAIL', t.adc_healthy ? 'ok' : 'alarm'));
+  sys.appendChild(row('Diagnostic fault', t.diagnostic_fault ? 'yes' : 'no', t.diagnostic_fault ? 'warn' : 'ok'));
+  sys.appendChild(row('Loop period', t.loop_period_ms + ' ms'));
+
+  const panel = document.getElementById('spindle-panels');
+  panel.innerHTML = '';
+  panel.appendChild(el('h2', null, 'Spindles'));
+  t.spindles.forEach(sp => {
+    const box = el('div');
+    box.style.marginBottom = '10px';
+    box.appendChild(row(sp.name + ' — ' + sp.state, sp.severity, SEVERITY_CLASS[sp.severity] || 'muted'));
+    box.appendChild(row('Current', sp.current_a.toFixed(2) + ' A (avg ' + sp.current_avg_a.toFixed(2) + ', pk ' + sp.current_peak_a.toFixed(2) + ')'));
+    box.appendChild(row('Pressure', sp.pressure.toFixed(1)));
+    box.appendChild(row('RPM', Math.round(sp.rpm)));
+    box.appendChild(row('Armed', sp.monitoring_armed ? 'yes' : 'no'));
+    panel.appendChild(box);
+  });
+}
+
+function renderConfig(cfg) {
+  const net = document.getElementById('net-rows');
+  net.innerHTML = '';
+  net.appendChild(row('Station', cfg.wifi.sta_connected ? cfg.wifi.sta_ip : 'not connected', cfg.wifi.sta_connected ? 'ok' : 'muted'));
+  net.appendChild(row('Fallback AP', cfg.wifi.ap_ssid));
+  net.appendChild(row('AP address', cfg.wifi.ap_ip));
+
+  document.getElementById('wifi-ssid').value = cfg.wifi.ssid || '';
+
+  const m = cfg.modbus;
+  document.getElementById('mb-rtu-enabled').checked = m.rtu_enabled;
+  document.getElementById('mb-baud').value = m.baud;
+  document.getElementById('mb-parity').value = m.parity;
+  document.getElementById('mb-stop').value = m.stop_bits;
+  document.getElementById('mb-data').value = m.data_bits;
+  document.getElementById('mb-slave').value = m.slave_id;
+  document.getElementById('mb-tcp-enabled').checked = m.tcp_enabled;
+  document.getElementById('mb-port').value = m.tcp_port;
+}
+
+let configLoaded = false;
+
+async function pollTelemetry() {
+  try {
+    const r = await fetch('/api/telemetry');
+    if (r.ok) renderTelemetry(await r.json());
+  } catch (e) { /* transient — next poll will retry */ }
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    if (r.ok) { renderConfig(await r.json()); configLoaded = true; }
+  } catch (e) { /* retry on next manual reload */ }
+}
+
+document.getElementById('save-btn').addEventListener('click', async () => {
+  const status = document.getElementById('save-status');
+  status.className = '';
+  status.textContent = 'Saving…';
+
+  const wifi = { ssid: document.getElementById('wifi-ssid').value };
+  const pass = document.getElementById('wifi-pass').value;
+  if (pass.length > 0) wifi.password = pass;
+
+  const modbus = {
+    rtu_enabled: document.getElementById('mb-rtu-enabled').checked,
+    baud: Number(document.getElementById('mb-baud').value),
+    parity: Number(document.getElementById('mb-parity').value),
+    stop_bits: Number(document.getElementById('mb-stop').value),
+    data_bits: Number(document.getElementById('mb-data').value),
+    slave_id: Number(document.getElementById('mb-slave').value),
+    tcp_enabled: document.getElementById('mb-tcp-enabled').checked,
+    tcp_port: Number(document.getElementById('mb-port').value),
+  };
+
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wifi, modbus }),
+    });
+    const body = await r.json();
+    if (r.ok && body.status === 'ok') {
+      status.className = 'ok';
+      status.textContent = 'Saved and applied.';
+      document.getElementById('wifi-pass').value = '';
+      loadConfig();
+    } else {
+      status.className = 'err';
+      status.textContent = 'Rejected: ' + (body.reason || 'unknown error');
+    }
+  } catch (e) {
+    status.className = 'err';
+    status.textContent = 'Save failed: ' + e;
+  }
+});
+
+loadConfig();
+pollTelemetry();
+setInterval(pollTelemetry, 1000);
+setInterval(() => { if (configLoaded) loadConfig(); }, 5000);
+</script>
+</body>
+</html>
