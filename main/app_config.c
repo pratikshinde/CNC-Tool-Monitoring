@@ -96,19 +96,17 @@ static void default_spindle(spindle_cfg_t *s, int index)
     memcpy(s->name, "Spindle 0", 10);
     s->name[8] = (char)('1' + index);
 
-    /* --- Current: 50 A / 50 mA CT into the fitted 33R burden.
-     * 50 A primary -> 50 mA secondary -> 1.65 V RMS across 33R, which fits
-     * the +/-2.048 V range with the bias applied. */
-    s->current.ct_primary_amps   = 50.0f;
-    s->current.ct_secondary_ma   = 50.0f;
-    s->current.gain_correction   = 1.0f;
+    /* --- Current: 30 A / 1 A CT into 0.1R burden with 2x (6 dB) opamp stage. */
+    s->current.ct_primary_amps   = 30.0f;
+    s->current.ct_secondary_ma   = 1000.0f;
+    s->current.gain_correction   = 0.506f;
     s->current.zero_offset_v     = CT_BIAS_VOLTS;
     s->current.rms_burst_samples = 128;
 
-    /* --- Pressure: 0-100 bar transmitter on a 4-20 mA loop. */
+    /* --- Pressure: 0-250 bar transmitter on a 4-20 mA loop across 180R shunt. */
     s->pressure.mode              = PRESSURE_INPUT_4_20MA;
     s->pressure.sensor_min        = 0.0f;
-    s->pressure.sensor_max        = 100.0f;
+    s->pressure.sensor_max        = 250.0f;
     memcpy(s->pressure.unit, "bar", 4);
     s->pressure.gain_correction   = 1.0f;
     s->pressure.offset_correction = 0.0f;

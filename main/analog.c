@@ -288,7 +288,7 @@ esp_err_t analog_read_pressure(uint8_t spindle, const pressure_cfg_t *cfg,
     int16_t raw;
     xSemaphoreTake(s_adc_mutex, portMAX_DELAY);
     esp_err_t err = ads1115_read_single(s_adc, k_pressure_ch[spindle],
-                                        OPERATING_FSR, PRESSURE_SPS, &raw);
+                                        ADS_FSR_4096, PRESSURE_SPS, &raw);
     xSemaphoreGive(s_adc_mutex);
 
     if (err != ESP_OK) {
@@ -297,7 +297,7 @@ esp_err_t analog_read_pressure(uint8_t spindle, const pressure_cfg_t *cfg,
         return err;
     }
 
-    float volts = ads1115_to_volts(raw, OPERATING_FSR);
+    float volts = ads1115_to_volts(raw, ADS_FSR_4096);
 
     out->adc_volts = volts;
     out->loop_ma   = pressure_loop_ma(volts);

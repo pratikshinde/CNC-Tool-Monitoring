@@ -22,7 +22,7 @@ extern "C" {
 
 /* Bump on any layout change. config_store refuses to load a blob whose
  * version it does not understand, and falls back to defaults. */
-#define CONFIG_SCHEMA_VERSION   2
+#define CONFIG_SCHEMA_VERSION   5
 
 #define CFG_NAME_LEN            24
 #define CFG_UNIT_LEN            8

@@ -37,10 +37,10 @@
 /* ADS1115 analogue input assignment.
  * Fixed by the PCB: swapping these means cutting tracks, so they are not
  * user-configurable. */
-#define ADS_CH_CURRENT_S1   0   /* AIN0 */
-#define ADS_CH_CURRENT_S2   1   /* AIN1 */
-#define ADS_CH_PRESSURE_S1  2   /* AIN2 */
-#define ADS_CH_PRESSURE_S2  3   /* AIN3 */
+#define ADS_CH_CURRENT_S1   0   /* AIN0: CT1 */
+#define ADS_CH_PRESSURE_S1  1   /* AIN1: Pressure 1 */
+#define ADS_CH_CURRENT_S2   2   /* AIN2: CT2 */
+#define ADS_CH_PRESSURE_S2  3   /* AIN3: Pressure 2 */
 
 /* ============================================================
  * Digital inputs — opto-isolated, active low at the MCU
@@ -106,7 +106,7 @@
 /* Pressure: 4-20 mA burden resistor. 100R gives 0.4-2.0 V, which sits
  * inside the +/-2.048 V ADS1115 range with headroom for over-range
  * detection up to ~20.4 mA. */
-#define PRESSURE_BURDEN_OHM         100.0f
+#define PRESSURE_BURDEN_OHM         180.0f
 
 /* Pressure: 0-10 V divider, R1 = 80.6k (top), R2 = 20k (bottom).
  * 10 V in -> 1.985 V at the ADC. */
@@ -117,8 +117,8 @@
 
 /* Current: CT burden resistor and the mid-rail bias applied to centre the
  * AC waveform inside the ADC's unipolar window. */
-#define CT_BURDEN_OHM               33.0f
-#define CT_BIAS_VOLTS               1.024f   /* nominal; measured at auto-zero */
+#define CT_BURDEN_OHM               0.1f
+#define CT_BIAS_VOLTS               1.65f    /* nominal; measured at auto-zero */
 
 /* ============================================================
  * Task layout (SRS SM-R6)

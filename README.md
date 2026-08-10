@@ -194,16 +194,22 @@ PLC.
 
 ## Hardware notes
 
+- **ADS1115 Channel Assignment**:
+  - `AIN0` -> Spindle 1 Current (CT1)
+  - `AIN1` -> Spindle 1 Pressure (4–20 mA)
+  - `AIN2` -> Spindle 2 Current (CT2)
+  - `AIN3` -> Spindle 2 Pressure (4–20 mA)
+- **CT Current Measurement**:
+  - Configured for **30:1** CT ratio (30 A primary / 1 A secondary).
+  - Fitted burden resistor: **0.1 Ω** with an opamp gain stage.
+  - CT reference bias voltage: nominal **1.65 V**.
+- **Pressure Measurement**:
+  - 4–20 mA pressure loop across a **180 Ω** burden resistor (range 0–250 bar).
+  - Sampled using `ADS_FSR_4096` (±4.096 V range) to support full 0.72 V – 3.60 V input span without ADC saturation.
 - DI0/DI1 are GPIO34/35, which are **input-only with no internal
   pull-ups**. External 10 kΩ pull-ups to 3V3 are required on the PCB or
   the pulse counter will pick up noise on a floating pin.
-- Pressure burden resistor is 100 Ω (0.4–2.0 V for 4–20 mA). The 0–10 V
-  divider is 80.6 kΩ / 20 kΩ. Both are declared in `board.h` — changing a
-  fitted part means changing the constant, or every reading is silently
-  wrong.
-- The ADS1115 runs at 3V3, so the ±4.096 V and ±6.144 V PGA settings are
-  unusable however tempting their headroom looks. Operating range is
-  ±2.048 V.
+- The 0–10 V divider is 80.6 kΩ / 20 kΩ.
 - Modbus RTU is wired to UART2: RXD on GPIO16, TXD on GPIO17, and the
   RS485 transceiver's DE/RE tied together on GPIO4 (driven by the UART's
   RTS line in half-duplex mode). Declared in `board.h`.
