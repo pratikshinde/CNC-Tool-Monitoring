@@ -22,7 +22,7 @@ extern "C" {
 
 /* Bump on any layout change. config_store refuses to load a blob whose
  * version it does not understand, and falls back to defaults. */
-#define CONFIG_SCHEMA_VERSION   7
+#define CONFIG_SCHEMA_VERSION   8
 
 #define CFG_NAME_LEN            24
 #define CFG_UNIT_LEN            8
@@ -46,6 +46,16 @@ typedef enum {
     QTY_RPM      = 2,
     QTY_COUNT
 } quantity_t;
+
+/* Bit flags over quantity_t, for do_cfg_t.quantity_mask — lets one digital
+ * output watch an arbitrary combination of quantities on one spindle
+ * (e.g. current + RPM anomaly on one output, pressure alone on another),
+ * rather than being limited to the single all-quantities-rolled-together
+ * DO_SRC_SPINDLE_ALARM/WARNING sources below. */
+#define DO_QTY_CURRENT   (1u << QTY_CURRENT)
+#define DO_QTY_PRESSURE  (1u << QTY_PRESSURE)
+#define DO_QTY_RPM       (1u << QTY_RPM)
+#define DO_QTY_ALL       (DO_QTY_CURRENT | DO_QTY_PRESSURE | DO_QTY_RPM)
 
 /* Four-band limits (SRS §6.1). Order is low-to-high so that a simple
  * comparison can validate LoLo <= Lo <= Hi <= HiHi. */
@@ -80,6 +90,7 @@ typedef enum {
     DO_SRC_ANY_WARNING,
     DO_SRC_SYSTEM_HEALTHY,   /* de-asserts on hang or fault — fail-safe       */
     DO_SRC_DIAG_FAULT,       /* sensor/hardware faults, distinct from process */
+    DO_SRC_SPINDLE_QUANTITY, /* one spindle, any quantity set in quantity_mask */
     DO_SRC_COUNT
 } do_source_t;
 
@@ -197,6 +208,7 @@ typedef struct {
 typedef struct {
     do_source_t source;
     uint8_t     spindle;        /* which spindle, for the per-spindle sources */
+    uint8_t     quantity_mask;  /* DO_QTY_* bits, only for DO_SRC_SPINDLE_QUANTITY */
     bool        invert;         /* true => normally-closed / fail-safe        */
     uint16_t    min_pulse_ms;   /* guarantee the PLC scan catches it (DO-R4)  */
 } do_cfg_t;

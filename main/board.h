@@ -51,8 +51,8 @@
 
 #define PIN_DI0             GPIO_NUM_34   /* spindle 1 RPM pulse  */
 #define PIN_DI1             GPIO_NUM_35   /* spindle 2 RPM pulse  */
-#define PIN_DI2             GPIO_NUM_32   /* reserved (SRS §2.2)  */
-#define PIN_DI3             GPIO_NUM_33   /* reserved             */
+#define PIN_DI2             GPIO_NUM_13   /* reserved (SRS §2.2)  */
+#define PIN_DI3             GPIO_NUM_27   /* reserved             */
 
 #define DI_ACTIVE_LEVEL     0             /* opto pulls low when energised */
 
@@ -68,10 +68,10 @@
  * Digital outputs — drive opto/relay stages to the PLC
  * ============================================================ */
 
-#define PIN_DO0             GPIO_NUM_25
-#define PIN_DO1             GPIO_NUM_26
-#define PIN_DO2             GPIO_NUM_27
-#define PIN_DO3             GPIO_NUM_14
+#define PIN_DO0             GPIO_NUM_26
+#define PIN_DO1             GPIO_NUM_25
+#define PIN_DO2             GPIO_NUM_33   /* moved from 27 to make room for PIN_DI3 */
+#define PIN_DO3             GPIO_NUM_23   /* moved from 14 */
 
 /* Level at the MCU that energises the output stage. */
 #define DO_ACTIVE_LEVEL     1

@@ -114,6 +114,7 @@
   <button class="active" data-tab="dashboard">Dashboard</button>
   <button data-tab="trends">Trends</button>
   <button data-tab="thresholds">Thresholds</button>
+  <button data-tab="outputs">Outputs</button>
   <button data-tab="calibration">Calibration</button>
   <button data-tab="comms">Comms</button>
   <button data-tab="system">System</button>
@@ -207,6 +208,32 @@
       <div class="btnrow">
         <button class="btn" onclick="saveThresholds()">Save thresholds</button>
         <span class="status" id="th-status"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-outputs" class="tab">
+    <div class="card">
+      <h2>Digital outputs</h2>
+      <div class="tblwrap">
+        <table>
+          <thead><tr>
+            <th>Output</th><th>Source</th><th>Spindle</th>
+            <th>Current</th><th>Pressure</th><th>RPM</th>
+            <th>Invert</th><th>Min ON (ms)</th>
+          </tr></thead>
+          <tbody id="out-rows"></tbody>
+        </table>
+      </div>
+      <p class="hint">Spindle and the quantity checkboxes only apply to the
+        per-spindle sources &mdash; they are ignored for sources like "System
+        healthy" that are not spindle-specific. Invert means normally
+        energised, de-energising on fault. Min ON holds an output asserted
+        for at least that long even if the fault clears sooner, so a PLC on a
+        slow scan cannot miss it.</p>
+      <div class="btnrow">
+        <button class="btn" onclick="saveOutputs()">Save outputs</button>
+        <span class="status" id="out-status"></span>
       </div>
     </div>
   </section>
@@ -558,6 +585,7 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'trends') loadHistory();
     if (b.dataset.tab === 'system') loadSystem();
     if (b.dataset.tab === 'calibration') loadCalib();
+    if (b.dataset.tab === 'outputs') loadOutputs();
   });
 });
 
@@ -762,6 +790,17 @@ const BAND_LABEL = ['LoLo','Lo','Hi','HiHi'];
 const QTY = ['current','pressure','rpm'];
 const QTY_LABEL = {current:'Current (A)', pressure:'Pressure', rpm:'Speed (RPM)'};
 
+/* Mirrors do_source_t (app_config.h) — index is the wire value. */
+const DO_SOURCE_LABEL = [
+  'Disabled', 'Spindle alarm', 'Spindle warning', 'Any spindle alarm',
+  'Any spindle warning', 'System healthy', 'Diagnostic fault',
+  'Spindle quantity',
+];
+const DO_SRC_SPINDLE_QUANTITY = 7;
+/* Bit flags over quantity_t (app_config.h DO_QTY_*) — bit position is the
+   quantity_t enum value, matching (1u << QTY_CURRENT) etc. in firmware. */
+const DO_QTY_BIT = { current: 1, pressure: 2, rpm: 4 };
+
 function activeSpindle() {
   const t = document.querySelector('nav button.active').dataset.tab;
   return t === 'calibration' ? $('cal-spindle').value : $('th-spindle').value;
@@ -885,6 +924,78 @@ async function saveThresholds() {
     await postJSON('/api/thresholds?spindle=' + $('th-spindle').value, body);
     setStatus('th-status','Saved and applied.','ok');
   } catch (e) { setStatus('th-status', 'Rejected: ' + e.message, 'err'); }
+}
+
+/* ---------- digital outputs ---------- */
+
+async function loadOutputs() {
+  let outputs;
+  try {
+    outputs = (await getJSON('/api/outputs')).outputs;
+  } catch (e) { return; }
+
+  const host = $('out-rows');
+  host.innerHTML = '';
+
+  outputs.forEach((o, d) => {
+    const tr = document.createElement('tr');
+    tr.appendChild(el('td', null, 'Out' + d));
+
+    const srcSel = document.createElement('select');
+    srcSel.id = `out-${d}-source`;
+    DO_SOURCE_LABEL.forEach((label, v) => srcSel.appendChild(new Option(label, v)));
+    srcSel.value = o.source;
+    const srcTd = el('td'); srcTd.appendChild(srcSel); tr.appendChild(srcTd);
+
+    const spSel = document.createElement('select');
+    spSel.id = `out-${d}-spindle`;
+    for (let i = 0; i < NSPINDLE; i++) {
+      spSel.appendChild(new Option(telemetry ? telemetry.spindles[i].name : ('Spindle ' + (i+1)), i));
+    }
+    spSel.value = o.spindle;
+    const spTd = el('td'); spTd.appendChild(spSel); tr.appendChild(spTd);
+
+    tr.appendChild(cellInput('checkbox', `out-${d}-current`,  !!(o.quantity_mask & DO_QTY_BIT.current)));
+    tr.appendChild(cellInput('checkbox', `out-${d}-pressure`, !!(o.quantity_mask & DO_QTY_BIT.pressure)));
+    tr.appendChild(cellInput('checkbox', `out-${d}-rpm`,      !!(o.quantity_mask & DO_QTY_BIT.rpm)));
+    tr.appendChild(cellInput('checkbox', `out-${d}-invert`,   o.invert));
+    tr.appendChild(cellInput('number',   `out-${d}-pulse`,    o.min_pulse_ms));
+
+    host.appendChild(tr);
+  });
+}
+
+async function saveOutputs() {
+  const outputs = [0,1,2,3].map(d => {
+    let mask = 0;
+    if ($(`out-${d}-current`).checked)  mask |= DO_QTY_BIT.current;
+    if ($(`out-${d}-pressure`).checked) mask |= DO_QTY_BIT.pressure;
+    if ($(`out-${d}-rpm`).checked)      mask |= DO_QTY_BIT.rpm;
+    return {
+      source:        Number($(`out-${d}-source`).value),
+      spindle:       Number($(`out-${d}-spindle`).value),
+      quantity_mask: mask,
+      invert:        $(`out-${d}-invert`).checked,
+      min_pulse_ms:  Number($(`out-${d}-pulse`).value),
+    };
+  });
+
+  /* A "Spindle quantity" source with no quantity checked would silently
+   * never assert — the firmware validator rejects it outright, but catching
+   * it here gives a clearer message than a generic "rejected" from the
+   * config commit. */
+  for (let d = 0; d < outputs.length; d++) {
+    if (outputs[d].source === DO_SRC_SPINDLE_QUANTITY && outputs[d].quantity_mask === 0) {
+      setStatus('out-status', `Out${d}: pick at least one quantity, or a different source.`, 'err');
+      return;
+    }
+  }
+
+  setStatus('out-status','Saving…');
+  try {
+    await postJSON('/api/outputs', { outputs });
+    setStatus('out-status','Saved and applied.','ok');
+  } catch (e) { setStatus('out-status', 'Rejected: ' + e.message, 'err'); }
 }
 
 async function saveCalibration() {

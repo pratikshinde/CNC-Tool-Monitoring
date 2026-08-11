@@ -177,13 +177,41 @@ void app_config_set_defaults(app_config_t *cfg)
         default_spindle(&cfg->spindle[i], i);
     }
 
-    /* Factory DO preset from SRS §2.1. Note DO3 is inverted: the healthy
-     * output is energised in normal operation so that a dead device, a
-     * broken wire or a lost supply all read the same to the PLC. */
-    cfg->dout[0] = (do_cfg_t){ DO_SRC_SPINDLE_ALARM,   0, false, 500 };
-    cfg->dout[1] = (do_cfg_t){ DO_SRC_SPINDLE_ALARM,   1, false, 500 };
-    cfg->dout[2] = (do_cfg_t){ DO_SRC_SPINDLE_WARNING, 0, false, 500 };
-    cfg->dout[3] = (do_cfg_t){ DO_SRC_SYSTEM_HEALTHY,  0, true,    0 };
+    /* Factory DO preset, per customer requirement: current + RPM anomaly
+     * together on one output per spindle, pressure on its own output per
+     * spindle. Pressure is inverted — normally energised, de-energises on
+     * an abnormal reading — everything else is normally de-energised,
+     * asserting on fault. Designated initializers deliberately, not
+     * positional: do_cfg_t has grown fields before and a silently
+     * mis-ordered positional list is exactly the kind of bug that only
+     * shows up on the bench.
+     *
+     * Current/RPM outputs get a 3 s minimum ON time (min_pulse_ms) per
+     * customer requirement: once asserted, hold for at least 3 s even if
+     * the fault clears sooner, so a PLC on a slow scan cannot miss it. This
+     * is a do_cfg_t field, not a band field, so it is not reachable from
+     * the Thresholds tab today — there is no "Outputs" tab yet. Changing
+     * it means editing this default and reflashing, same as this change. */
+    cfg->dout[0] = (do_cfg_t){
+        .source = DO_SRC_SPINDLE_QUANTITY, .spindle = 0,
+        .quantity_mask = DO_QTY_CURRENT | DO_QTY_RPM,
+        .invert = false, .min_pulse_ms = 3000,
+    };
+    cfg->dout[1] = (do_cfg_t){
+        .source = DO_SRC_SPINDLE_QUANTITY, .spindle = 0,
+        .quantity_mask = DO_QTY_PRESSURE,
+        .invert = true, .min_pulse_ms = 500,
+    };
+    cfg->dout[2] = (do_cfg_t){
+        .source = DO_SRC_SPINDLE_QUANTITY, .spindle = 1,
+        .quantity_mask = DO_QTY_CURRENT | DO_QTY_RPM,
+        .invert = false, .min_pulse_ms = 3000,
+    };
+    cfg->dout[3] = (do_cfg_t){
+        .source = DO_SRC_SPINDLE_QUANTITY, .spindle = 1,
+        .quantity_mask = DO_QTY_PRESSURE,
+        .invert = true, .min_pulse_ms = 500,
+    };
 
     app_config_seal(cfg);
 }
@@ -300,8 +328,17 @@ cfg_result_t app_config_validate(const app_config_t *cfg, uint8_t *which)
     for (int d = 0; d < NUM_DIGITAL_OUT; d++) {
         if (cfg->dout[d].source >= DO_SRC_COUNT) return CFG_ERR_DO_SOURCE;
         if ((cfg->dout[d].source == DO_SRC_SPINDLE_ALARM ||
-             cfg->dout[d].source == DO_SRC_SPINDLE_WARNING) &&
+             cfg->dout[d].source == DO_SRC_SPINDLE_WARNING ||
+             cfg->dout[d].source == DO_SRC_SPINDLE_QUANTITY) &&
             cfg->dout[d].spindle >= NUM_SPINDLES) {
+            return CFG_ERR_DO_SOURCE;
+        }
+        if (cfg->dout[d].source == DO_SRC_SPINDLE_QUANTITY &&
+            (cfg->dout[d].quantity_mask == 0 ||
+             cfg->dout[d].quantity_mask > DO_QTY_ALL)) {
+            /* An empty mask would silently never assert, which looks
+             * indistinguishable from "working, nothing wrong" — treat it
+             * as a configuration error rather than a quiet no-op output. */
             return CFG_ERR_DO_SOURCE;
         }
     }

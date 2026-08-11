@@ -22,6 +22,12 @@ typedef struct {
     const alarm_state_t *alarm[NUM_SPINDLES];
     bool spindle_enabled[NUM_SPINDLES];
 
+    /* Current flowing with no RPM pulses — a broken speed sensor, not a
+     * stopped spindle (see monitor.c). Folded into DO_SRC_SPINDLE_QUANTITY's
+     * RPM bit alongside the RPM bands themselves, since a dead sensor is
+     * exactly the kind of "RPM anomaly" a PLC-facing output should catch. */
+    bool rpm_sensor_suspect[NUM_SPINDLES];
+
     /* System-level inputs that are not per-spindle. */
     bool system_healthy;   /* all tasks alive, ADC responding, config valid */
     bool diagnostic_fault; /* any sensor or hardware fault                  */

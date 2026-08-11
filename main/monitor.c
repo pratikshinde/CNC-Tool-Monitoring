@@ -242,6 +242,7 @@ static void monitor_task(void *arg)
         for (int i = 0; i < NUM_SPINDLES; i++) {
             dmi.alarm[i] = &s_rt[i].alarm;
             dmi.spindle_enabled[i] = cfg->spindle[i].enabled;
+            dmi.rpm_sensor_suspect[i] = s_snap.spindle[i].rpm_sensor_suspect;
         }
 
         bool demand[NUM_DIGITAL_OUT];

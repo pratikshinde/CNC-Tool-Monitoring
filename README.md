@@ -29,12 +29,12 @@ below — and the full Phase 4 Material UI SPA remains unbuilt.
 | Spindle state machine | done, host-tested |
 | Alarm engine: bands, delays, hysteresis, latching | done, host-tested |
 | Breakage / crash / wear-trend detection | done, host-tested, **defaults unvalidated** |
-| Digital output mapping | done, host-tested |
+| Digital output mapping: per-quantity masks (current/pressure/RPM, any combination, per spindle) | done, host-tested, UI-configurable |
 | WiFi (station + always-on fallback AP) | done |
 | Modbus RTU (RS485) + Modbus TCP, read-only telemetry registers | done |
-| Guided 2-point calibration (pressure) + 1-point + auto-zero (current) | done |
+| Guided 2-point calibration (pressure) + 1-point + auto-zero (current) | done, bench-verified to ±1 bar within the calibrated span |
 | No-load current deadband | done |
-| Web UI: dashboard, trends, thresholds, calibration, comms, system | done, not the Phase 4 SPA |
+| Web UI: dashboard, trends, thresholds, outputs, calibration, comms, system | done, not the Phase 4 SPA |
 | OTA: browser-upload firmware update, project/version checked | done |
 | On-device data logging | **dropped** — flash budget does not support it |
 
@@ -103,8 +103,8 @@ main/
   calib.[ch]       guided field calibration (2-point pressure, 1-point CT, auto-zero)
   trend.[ch]       5-minute RAM ring buffer for the live graph (not persisted)
   ota.[ch]         browser-upload firmware update into the spare OTA slot
-  web.[ch]         HTTP server: dashboard/trend/threshold/calibration/comms/
-                   system API, ~15 routes
+  web.[ch]         HTTP server: dashboard/trend/threshold/output-mapping/
+                   calibration/comms/system API, ~18 routes
   web/index.html   the multi-tab operator UI (embedded in firmware)
   main.c           bring-up
 host_test/         gcc test harness
@@ -189,9 +189,20 @@ was just produced. The real-time loop is pinned to core 0 so Wi-Fi and
 HTTP on core 1 cannot delay it.
 
 **Outputs are held in their safe state until the first complete
-measurement cycle**, and the system-healthy output is inverted by default
-so that a fault, a broken wire and a dead device all read alike to the
-PLC.
+measurement cycle.**
+
+**Digital outputs can watch any combination of quantities, not just an
+all-or-nothing per-spindle alarm.** `do_cfg_t.quantity_mask` (`app_config.h`)
+lets one output assert on current+RPM together while a separate output
+watches pressure alone, per spindle — the factory default now ships exactly
+that split (see Hardware notes) rather than the original SRS §2.1 preset,
+which used one of the four outputs for a system-healthy signal. That
+signal no longer exists on any physical output under the current default —
+all four are spoken for by per-spindle fault detection. A quantity counts
+as faulted using the same active-or-latched test `alarm.c` itself uses for
+its own roll-ups, plus breakage/crash/wear-trend folded into "current" and
+a suspect RPM sensor folded into "RPM" — both are current/RPM-signature
+conditions even though neither is a band violation on its own.
 
 ---
 
@@ -251,6 +262,25 @@ PLC.
 - Modbus RTU is wired to UART2: RXD on GPIO16, TXD on GPIO17, and the
   RS485 transceiver's DE/RE tied together on GPIO4 (driven by the UART's
   RTS line in half-duplex mode). Declared in `board.h`.
+- **Digital I/O pin map** (all in `board.h`; DI2/3 and all four DO pins
+  moved during bring-up from the original SRS §2.1 assignment — check
+  `board.h` directly before trusting any older schematic):
+
+  | Signal | GPIO | Notes |
+  |---|---|---|
+  | DI0 | 34 | spindle 1 RPM pulse, input-only, no internal pull-up |
+  | DI1 | 35 | spindle 2 RPM pulse, input-only, no internal pull-up |
+  | DI2 | 13 | reserved |
+  | DI3 | 27 | reserved |
+  | DO0 | 26 | spindle 1 current + RPM anomaly (factory default) |
+  | DO1 | 25 | spindle 1 pressure anomaly, **inverted** — normal = high |
+  | DO2 | 33 | spindle 2 current + RPM anomaly (factory default) |
+  | DO3 | 23 | spindle 2 pressure anomaly, **inverted** — normal = high |
+
+  DO0–DO3's *sources* (which quantities drive which output, and the
+  invert/min-pulse behaviour) are reconfigurable from the web UI's Outputs
+  tab without a reflash; the table above is only the factory default and
+  the physical pin each output lands on.
 
 ---
 

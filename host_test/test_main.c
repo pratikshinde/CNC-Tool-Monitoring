@@ -284,6 +284,22 @@ static void test_config_validation(void)
     CHECK(app_config_validate(&bad, NULL) == CFG_ERR_DO_SOURCE,
           "output mapped to a nonexistent spindle must be rejected");
 
+    /* A zero quantity_mask would silently never assert — indistinguishable
+     * from "working, nothing wrong" — so it is rejected rather than
+     * accepted as a quiet no-op output. */
+    bad = cfg;
+    bad.dout[0].source = DO_SRC_SPINDLE_QUANTITY;
+    bad.dout[0].spindle = 0;
+    bad.dout[0].quantity_mask = 0;
+    app_config_seal(&bad);
+    CHECK(app_config_validate(&bad, NULL) == CFG_ERR_DO_SOURCE,
+          "a zero quantity_mask must be rejected");
+
+    bad.dout[0].quantity_mask = (uint8_t)(DO_QTY_ALL + 1);
+    app_config_seal(&bad);
+    CHECK(app_config_validate(&bad, NULL) == CFG_ERR_DO_SOURCE,
+          "a quantity_mask with bits outside DO_QTY_ALL must be rejected");
+
     /* A disabled spindle's settings should not block the save. */
     bad = cfg;
     bad.spindle[1].enabled = false;
@@ -841,6 +857,18 @@ static void test_output_mapping(void)
     app_config_t cfg;
     app_config_set_defaults(&cfg);
 
+    /* This test exercises do_map_evaluate()'s source types directly rather
+     * than relying on whatever app_config_set_defaults() currently ships as
+     * the factory dout[] preset — the two have drifted apart before (the
+     * factory preset is now DO_SRC_SPINDLE_QUANTITY throughout, per a
+     * customer-specific requirement) and coupling this test to that preset
+     * would make it fail every time the preset changes for reasons that
+     * have nothing to do with do_map.c's correctness. */
+    cfg.dout[0] = (do_cfg_t){ .source = DO_SRC_SPINDLE_ALARM,   .spindle = 0, .min_pulse_ms = 500 };
+    cfg.dout[1] = (do_cfg_t){ .source = DO_SRC_SPINDLE_ALARM,   .spindle = 1, .min_pulse_ms = 500 };
+    cfg.dout[2] = (do_cfg_t){ .source = DO_SRC_SPINDLE_WARNING, .spindle = 0, .min_pulse_ms = 500 };
+    cfg.dout[3] = (do_cfg_t){ .source = DO_SRC_SYSTEM_HEALTHY };
+
     alarm_state_t a0, a1;
     alarm_init(&a0);
     alarm_init(&a1);
@@ -914,6 +942,101 @@ static void test_output_mapping(void)
     do_map_evaluate(&diag, &in, out);
     CHECK(out[0], "diagnostic fault output asserts");
     CHECK(!out[1], "a diagnostic fault must not assert a process alarm output");
+
+    /* --- DO_SRC_SPINDLE_QUANTITY: per-quantity output masks ------------
+     * Exercises the customer requirement: current+RPM on one output,
+     * pressure alone on another, per spindle. */
+    section("digital output mapping — per-quantity masks");
+
+    in.diagnostic_fault = false;
+    in.spindle_enabled[0] = in.spindle_enabled[1] = true;
+    alarm_init(&a0);
+    alarm_init(&a1);
+    memset(in.rpm_sensor_suspect, 0, sizeof(in.rpm_sensor_suspect));
+
+    app_config_t qc = cfg;
+    qc.dout[0] = (do_cfg_t){
+        .source = DO_SRC_SPINDLE_QUANTITY, .spindle = 0,
+        .quantity_mask = DO_QTY_CURRENT | DO_QTY_RPM,
+    };
+    qc.dout[1] = (do_cfg_t){
+        .source = DO_SRC_SPINDLE_QUANTITY, .spindle = 0,
+        .quantity_mask = DO_QTY_PRESSURE,
+    };
+
+    do_map_evaluate(&qc, &in, out);
+    CHECK(!out[0] && !out[1], "quiet spindle: both quantity outputs clear");
+
+    /* A current-band violation must reach the current+RPM output, not the
+     * pressure-only one. */
+    a0.bands[QTY_CURRENT][BAND_HI].active = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(out[0],  "current band active reaches the current+RPM output");
+    CHECK(!out[1], "current band active must not reach the pressure-only output");
+    a0.bands[QTY_CURRENT][BAND_HI].active = false;
+
+    /* A pressure-band violation is the mirror image. */
+    a0.bands[QTY_PRESSURE][BAND_LOLO].active = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(!out[0], "pressure band active must not reach the current+RPM output");
+    CHECK(out[1],  "pressure band active reaches the pressure-only output");
+    a0.bands[QTY_PRESSURE][BAND_LOLO].active = false;
+
+    /* A latched-but-no-longer-active band must still count — same
+     * active-or-latched test alarm.c itself uses for any_alarm/any_warning. */
+    a0.bands[QTY_PRESSURE][BAND_LOLO].latched = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(out[1], "a latched pressure band still reaches the pressure output");
+    a0.bands[QTY_PRESSURE][BAND_LOLO].latched = false;
+
+    /* Breakage/crash/wear-trend are current-signature conditions and must
+     * roll into the current quantity even with no band active. */
+    a0.breakage = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(out[0], "breakage reaches the current+RPM output");
+    CHECK(!out[1], "breakage must not reach the pressure-only output");
+    a0.breakage = false;
+
+    a0.crash_latched = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(out[0], "a latched crash reaches the current+RPM output");
+    a0.crash_latched = false;
+
+    a0.trend = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(out[0], "wear trend reaches the current+RPM output");
+    a0.trend = false;
+
+    /* A suspect RPM sensor (current flowing, no pulses) is an RPM-side
+     * anomaly even though it never sets an RPM band. */
+    in.rpm_sensor_suspect[0] = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(out[0],  "a suspect RPM sensor reaches the current+RPM output");
+    CHECK(!out[1], "a suspect RPM sensor must not reach the pressure-only output");
+    in.rpm_sensor_suspect[0] = false;
+
+    /* Spindle independence still holds for this source too. */
+    a1.bands[QTY_CURRENT][BAND_HIHI].active = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(!out[0], "spindle 2's current fault must not reach spindle 1's output");
+    a1.bands[QTY_CURRENT][BAND_HIHI].active = false;
+
+    /* A disabled spindle must not be able to drive a quantity output. */
+    in.spindle_enabled[0] = false;
+    a0.bands[QTY_CURRENT][BAND_HI].active = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(!out[0], "a disabled spindle must not drive its quantity output");
+    in.spindle_enabled[0] = true;
+    a0.bands[QTY_CURRENT][BAND_HI].active = false;
+
+    /* An empty or out-of-range mask is a config error, caught by
+     * app_config_validate() (see test_config_validation) — not exercised
+     * here since do_map_evaluate() itself has no validation to do; a zero
+     * mask simply never matches any quantity and the output stays clear. */
+    qc.dout[0].quantity_mask = 0;
+    a0.bands[QTY_CURRENT][BAND_HI].active = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(!out[0], "a zero quantity_mask never asserts");
 }
 
 /* ============================================================
