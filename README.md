@@ -7,7 +7,14 @@ drives alarm outputs to a PLC when a tool wears, breaks or crashes.
 **Target:** ESP32 (16 MB flash) · ESP-IDF v6.0.2 · standalone, no cloud
 
 Requirements and plan: [`SRS_CNC_Tool_Monitor.md`](../SRS_CNC_Tool_Monitor.md) ·
-[`ROADMAP_CNC_Tool_Monitor.md`](../ROADMAP_CNC_Tool_Monitor.md)
+[`ROADMAP_CNC_Tool_Monitor.md`](../ROADMAP_CNC_Tool_Monitor.md) *(both referenced,
+neither exists in this repo yet — known gap)*
+
+**Hardware redesign in progress:** acquisition and PLC fault-signalling are
+moving off the ESP32 onto two dedicated per-spindle MCUs (Nuvoton M031FB0AE).
+See [`SMU_HARDWARE_REQUIREMENTS.md`](SMU_HARDWARE_REQUIREMENTS.md) for the full
+spec — this is a hardware change, not yet reflected in the firmware described
+below.
 
 ---
 
