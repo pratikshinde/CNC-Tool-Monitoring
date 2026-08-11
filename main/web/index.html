@@ -114,7 +114,6 @@
   <button class="active" data-tab="dashboard">Dashboard</button>
   <button data-tab="trends">Trends</button>
   <button data-tab="thresholds">Thresholds</button>
-  <button data-tab="outputs">Outputs</button>
   <button data-tab="calibration">Calibration</button>
   <button data-tab="comms">Comms</button>
   <button data-tab="system">System</button>
@@ -208,32 +207,6 @@
       <div class="btnrow">
         <button class="btn" onclick="saveThresholds()">Save thresholds</button>
         <span class="status" id="th-status"></span>
-      </div>
-    </div>
-  </section>
-
-  <section id="tab-outputs" class="tab">
-    <div class="card">
-      <h2>Digital outputs</h2>
-      <div class="tblwrap">
-        <table>
-          <thead><tr>
-            <th>Output</th><th>Source</th><th>Spindle</th>
-            <th>Current</th><th>Pressure</th><th>RPM</th>
-            <th>Invert</th><th>Min ON (ms)</th>
-          </tr></thead>
-          <tbody id="out-rows"></tbody>
-        </table>
-      </div>
-      <p class="hint">Spindle and the quantity checkboxes only apply to the
-        per-spindle sources &mdash; they are ignored for sources like "System
-        healthy" that are not spindle-specific. Invert means normally
-        energised, de-energising on fault. Min ON holds an output asserted
-        for at least that long even if the fault clears sooner, so a PLC on a
-        slow scan cannot miss it.</p>
-      <div class="btnrow">
-        <button class="btn" onclick="saveOutputs()">Save outputs</button>
-        <span class="status" id="out-status"></span>
       </div>
     </div>
   </section>
@@ -585,7 +558,6 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'trends') loadHistory();
     if (b.dataset.tab === 'system') loadSystem();
     if (b.dataset.tab === 'calibration') loadCalib();
-    if (b.dataset.tab === 'outputs') loadOutputs();
   });
 });
 
@@ -664,6 +636,7 @@ async function pollTelemetry() {
     telemetry.adc_healthy ? 'ok' : 'alarm'));
 
   if ($('tab-trends').classList.contains('active')) appendLive();
+  if ($('tab-thresholds').classList.contains('active')) updateThresholdLiveValues();
 }
 
 function metric(label, value, unit) {
@@ -790,17 +763,6 @@ const BAND_LABEL = ['LoLo','Lo','Hi','HiHi'];
 const QTY = ['current','pressure','rpm'];
 const QTY_LABEL = {current:'Current (A)', pressure:'Pressure', rpm:'Speed (RPM)'};
 
-/* Mirrors do_source_t (app_config.h) — index is the wire value. */
-const DO_SOURCE_LABEL = [
-  'Disabled', 'Spindle alarm', 'Spindle warning', 'Any spindle alarm',
-  'Any spindle warning', 'System healthy', 'Diagnostic fault',
-  'Spindle quantity',
-];
-const DO_SRC_SPINDLE_QUANTITY = 7;
-/* Bit flags over quantity_t (app_config.h DO_QTY_*) — bit position is the
-   quantity_t enum value, matching (1u << QTY_CURRENT) etc. in firmware. */
-const DO_QTY_BIT = { current: 1, pressure: 2, rpm: 4 };
-
 function activeSpindle() {
   const t = document.querySelector('nav button.active').dataset.tab;
   return t === 'calibration' ? $('cal-spindle').value : $('th-spindle').value;
@@ -848,6 +810,21 @@ async function loadSpindle() {
   $('sp-enabled').checked = spindleCfg.enabled;
 }
 
+/* Which of Lo (index 1) / Hi (index 2) apply per quantity, per project
+ * requirement: current is over-current only, RPM is under-speed only,
+ * pressure keeps both. LoLo/HiHi (0/3) stay in the data model (do_map.c and
+ * alarm.c are unchanged) but are never shown — saveThresholds() carries
+ * their stored values through untouched, forced disabled, same as the
+ * unused side of current/RPM. Hysteresis/on-delay/off-delay/latching are
+ * fixed per project requirement, not shown: every band that is enabled
+ * auto-clears with no acknowledgement step, so there is no latch toggle
+ * either. */
+const BAND_LO_IDX = 1, BAND_HI_IDX = 2;
+const VISIBLE_BANDS = {
+  current:  [BAND_HI_IDX],
+  pressure: [BAND_LO_IDX, BAND_HI_IDX],
+  rpm:      [BAND_LO_IDX],
+};
 function renderBands() {
   const host = $('th-bands');
   host.innerHTML = '';
@@ -856,24 +833,27 @@ function renderBands() {
     const fs = el('fieldset');
     fs.appendChild(el('legend', null, QTY_LABEL[q]));
 
+    const live = el('div','row');
+    live.appendChild(el('div','k','Live value'));
+    live.appendChild(el('div', 'v big', '—'));
+    live.lastChild.id = `th-live-${q}`;
+    fs.appendChild(live);
+
     const wrap = el('div','tblwrap');
     const t = el('table');
     const thead = el('thead');
     const hr = document.createElement('tr');
-    ['Band','On','Limit','Hysteresis','On delay (ms)','Off delay (ms)','Latch']
+    ['Limit','On']
       .forEach(x => { const th = el('th',null,x); hr.appendChild(th); });
     thead.appendChild(hr); t.appendChild(thead);
 
     const tb = el('tbody');
-    spindleCfg.bands[q].forEach((b, bi) => {
+    VISIBLE_BANDS[q].forEach(bi => {
+      const b = spindleCfg.bands[q][bi];
       const tr = document.createElement('tr');
       tr.appendChild(el('td', null, BAND_LABEL[bi]));
-      tr.appendChild(cellInput('checkbox', `b-${q}-${bi}-enabled`, b.enabled));
       tr.appendChild(cellInput('number', `b-${q}-${bi}-limit`, b.limit));
-      tr.appendChild(cellInput('number', `b-${q}-${bi}-hysteresis`, b.hysteresis));
-      tr.appendChild(cellInput('number', `b-${q}-${bi}-on_delay_ms`, b.on_delay_ms));
-      tr.appendChild(cellInput('number', `b-${q}-${bi}-off_delay_ms`, b.off_delay_ms));
-      tr.appendChild(cellInput('checkbox', `b-${q}-${bi}-latching`, b.latching));
+      tr.appendChild(cellInput('checkbox', `b-${q}-${bi}-enabled`, b.enabled));
       tb.appendChild(tr);
     });
     t.appendChild(tb);
@@ -883,9 +863,27 @@ function renderBands() {
   });
 
   const note = el('p','hint',
-    'Enabled limits must stay in order: LoLo ≤ Lo ≤ Hi ≤ HiHi. ' +
-    'Disabled bands are ignored, so a stale value on one will not block a save.');
+    'Hysteresis, on/off delay and latching are fixed for this project and ' +
+    'not shown here.');
   host.appendChild(note);
+
+  updateThresholdLiveValues();
+}
+
+/* Updates only the live-value spans, not the whole table — called on every
+ * telemetry poll while this tab is open. Re-rendering the table on a 1 Hz
+ * timer would wipe out a limit the operator is mid-way through typing. */
+function updateThresholdLiveValues() {
+  if (!telemetry) return;
+  const el_ = document.getElementById(`th-live-current`);
+  if (!el_) return; /* tab not built yet */
+
+  const sp = telemetry.spindles[Number($('th-spindle').value)];
+  if (!sp) return;
+
+  $('th-live-current').textContent  = sp.current_a.toFixed(2) + ' A';
+  $('th-live-pressure').textContent = sp.pressure.toFixed(1) + ' ' + sp.pressure_unit;
+  $('th-live-rpm').textContent      = Math.round(sp.rpm) + ' rpm';
 }
 
 function cellInput(type, id, value) {
@@ -901,14 +899,29 @@ function cellInput(type, id, value) {
 async function saveThresholds() {
   const bands = {};
   QTY.forEach(q => {
-    bands[q] = [0,1,2,3].map(bi => ({
-      enabled:      $(`b-${q}-${bi}-enabled`).checked,
-      limit:        Number($(`b-${q}-${bi}-limit`).value),
-      hysteresis:   Number($(`b-${q}-${bi}-hysteresis`).value),
-      on_delay_ms:  Number($(`b-${q}-${bi}-on_delay_ms`).value),
-      off_delay_ms: Number($(`b-${q}-${bi}-off_delay_ms`).value),
-      latching:     $(`b-${q}-${bi}-latching`).checked,
-    }));
+    bands[q] = [0,1,2,3].map(bi => {
+      const stored = spindleCfg.bands[q][bi];
+      if (VISIBLE_BANDS[q].includes(bi)) {
+        /* Only the band(s) this quantity actually shows are user-editable.
+         * Hysteresis/delays are fixed for this project, carried through
+         * unchanged; latching is forced off regardless of what was stored,
+         * since every band here is meant to auto-clear with no
+         * acknowledgement step. */
+        return {
+          enabled:      $(`b-${q}-${bi}-enabled`).checked,
+          limit:        Number($(`b-${q}-${bi}-limit`).value),
+          hysteresis:   stored.hysteresis,
+          on_delay_ms:  stored.on_delay_ms,
+          off_delay_ms: stored.off_delay_ms,
+          latching:     false,
+        };
+      }
+      /* Not shown for this quantity (LoLo/HiHi always, plus Lo for current
+       * and Hi for RPM). Carried through unchanged except forced disabled,
+       * so it cannot end up armed via a stale value from some earlier
+       * configuration. */
+      return { ...stored, enabled: false };
+    });
   });
 
   const body = { bands, sm: {
@@ -924,78 +937,6 @@ async function saveThresholds() {
     await postJSON('/api/thresholds?spindle=' + $('th-spindle').value, body);
     setStatus('th-status','Saved and applied.','ok');
   } catch (e) { setStatus('th-status', 'Rejected: ' + e.message, 'err'); }
-}
-
-/* ---------- digital outputs ---------- */
-
-async function loadOutputs() {
-  let outputs;
-  try {
-    outputs = (await getJSON('/api/outputs')).outputs;
-  } catch (e) { return; }
-
-  const host = $('out-rows');
-  host.innerHTML = '';
-
-  outputs.forEach((o, d) => {
-    const tr = document.createElement('tr');
-    tr.appendChild(el('td', null, 'Out' + d));
-
-    const srcSel = document.createElement('select');
-    srcSel.id = `out-${d}-source`;
-    DO_SOURCE_LABEL.forEach((label, v) => srcSel.appendChild(new Option(label, v)));
-    srcSel.value = o.source;
-    const srcTd = el('td'); srcTd.appendChild(srcSel); tr.appendChild(srcTd);
-
-    const spSel = document.createElement('select');
-    spSel.id = `out-${d}-spindle`;
-    for (let i = 0; i < NSPINDLE; i++) {
-      spSel.appendChild(new Option(telemetry ? telemetry.spindles[i].name : ('Spindle ' + (i+1)), i));
-    }
-    spSel.value = o.spindle;
-    const spTd = el('td'); spTd.appendChild(spSel); tr.appendChild(spTd);
-
-    tr.appendChild(cellInput('checkbox', `out-${d}-current`,  !!(o.quantity_mask & DO_QTY_BIT.current)));
-    tr.appendChild(cellInput('checkbox', `out-${d}-pressure`, !!(o.quantity_mask & DO_QTY_BIT.pressure)));
-    tr.appendChild(cellInput('checkbox', `out-${d}-rpm`,      !!(o.quantity_mask & DO_QTY_BIT.rpm)));
-    tr.appendChild(cellInput('checkbox', `out-${d}-invert`,   o.invert));
-    tr.appendChild(cellInput('number',   `out-${d}-pulse`,    o.min_pulse_ms));
-
-    host.appendChild(tr);
-  });
-}
-
-async function saveOutputs() {
-  const outputs = [0,1,2,3].map(d => {
-    let mask = 0;
-    if ($(`out-${d}-current`).checked)  mask |= DO_QTY_BIT.current;
-    if ($(`out-${d}-pressure`).checked) mask |= DO_QTY_BIT.pressure;
-    if ($(`out-${d}-rpm`).checked)      mask |= DO_QTY_BIT.rpm;
-    return {
-      source:        Number($(`out-${d}-source`).value),
-      spindle:       Number($(`out-${d}-spindle`).value),
-      quantity_mask: mask,
-      invert:        $(`out-${d}-invert`).checked,
-      min_pulse_ms:  Number($(`out-${d}-pulse`).value),
-    };
-  });
-
-  /* A "Spindle quantity" source with no quantity checked would silently
-   * never assert — the firmware validator rejects it outright, but catching
-   * it here gives a clearer message than a generic "rejected" from the
-   * config commit. */
-  for (let d = 0; d < outputs.length; d++) {
-    if (outputs[d].source === DO_SRC_SPINDLE_QUANTITY && outputs[d].quantity_mask === 0) {
-      setStatus('out-status', `Out${d}: pick at least one quantity, or a different source.`, 'err');
-      return;
-    }
-  }
-
-  setStatus('out-status','Saving…');
-  try {
-    await postJSON('/api/outputs', { outputs });
-    setStatus('out-status','Saved and applied.','ok');
-  } catch (e) { setStatus('out-status', 'Rejected: ' + e.message, 'err'); }
 }
 
 async function saveCalibration() {

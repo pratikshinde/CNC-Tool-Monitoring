@@ -61,17 +61,24 @@ static void default_bands(band_cfg_t bands[BAND_COUNT],
                           float lolo, float lo, float hi, float hihi,
                           float hyst)
 {
-    /* Ship with the critical bands armed and the warning bands armed but
-     * non-latching. A device that arrives with everything disabled tends to
-     * stay that way; a device that arrives latching everything gets its
-     * outputs disconnected on day two. */
+    /* Per customer requirement: only Lo/Hi are used (LoLo/HiHi stay in the
+     * data model — do_map.c and alarm.c are unchanged — but are disabled by
+     * default and not reachable from the web UI's simplified Thresholds
+     * tab). Neither Lo nor Hi latches: every enabled band is meant to
+     * assert and clear on its own as the reading crosses back in range,
+     * with no separate acknowledgement step. Hysteresis and the on/off
+     * delays stay non-zero — they exist to stop a noisy reading right at
+     * the limit from chattering the output, and a momentary spike from
+     * tripping it instantly — but are fixed for this project rather than
+     * user-editable, so their values do not need to be "reasonable
+     * defaults shown in a form," just reasonable. */
     bands[BAND_LOLO] = (band_cfg_t){
-        .enabled = false,          /* low limits need a known-good process first */
+        .enabled = false,
         .limit = lolo, .hysteresis = hyst,
-        .on_delay_ms = 200, .off_delay_ms = 500, .latching = true,
+        .on_delay_ms = 200, .off_delay_ms = 500, .latching = false,
     };
     bands[BAND_LO] = (band_cfg_t){
-        .enabled = false,
+        .enabled = true,
         .limit = lo, .hysteresis = hyst,
         .on_delay_ms = 500, .off_delay_ms = 1000, .latching = false,
     };
@@ -81,9 +88,9 @@ static void default_bands(band_cfg_t bands[BAND_COUNT],
         .on_delay_ms = 500, .off_delay_ms = 1000, .latching = false,
     };
     bands[BAND_HIHI] = (band_cfg_t){
-        .enabled = true,
+        .enabled = false,
         .limit = hihi, .hysteresis = hyst,
-        .on_delay_ms = 100, .off_delay_ms = 500, .latching = true,
+        .on_delay_ms = 100, .off_delay_ms = 500, .latching = false,
     };
 }
 
@@ -143,10 +150,20 @@ static void default_spindle(spindle_cfg_t *s, int index)
     s->wear.adaptive_k_warn    = 3.0f;
     s->wear.adaptive_k_alarm   = 5.0f;
 
-    /* --- Thresholds, sized against the default 50 A CT and 100 bar sensor. */
+    /* --- Thresholds, sized against the default 50 A CT and 100 bar sensor.
+     * Per project requirement, only one side matters for current and RPM —
+     * current is over-current only (Hi), RPM is under-speed only (Lo),
+     * pressure keeps both. The unused side stays in the data model
+     * (disabled, like LoLo/HiHi) rather than being removed, so nothing
+     * above app_config.c/the web UI has to change if that ever needs
+     * revisiting. */
     default_bands(s->bands[QTY_CURRENT],   2.0f,   5.0f,  35.0f,  45.0f,  0.5f);
+    s->bands[QTY_CURRENT][BAND_LO].enabled = false;
+
     default_bands(s->bands[QTY_PRESSURE], 10.0f,  20.0f,  80.0f,  95.0f,  1.0f);
+
     default_bands(s->bands[QTY_RPM],     100.0f, 500.0f, 9000.0f, 10000.0f, 50.0f);
+    s->bands[QTY_RPM][BAND_HI].enabled = false;
 }
 
 void app_config_set_defaults(app_config_t *cfg)

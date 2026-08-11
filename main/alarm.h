@@ -57,9 +57,7 @@ typedef struct {
     transient_hist_t current_hist;
 
     bool             breakage;
-    bool             breakage_latched;
     bool             crash;
-    bool             crash_latched;
     bool             trend;
 
     /* Wear trend tracking across cycles (TW-R7). */

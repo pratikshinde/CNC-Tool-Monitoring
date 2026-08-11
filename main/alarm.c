@@ -138,7 +138,6 @@ static void transient_eval(alarm_state_t *st, const wear_cfg_t *cfg,
                 float drop_pct = (ref - current) / ref * 100.0f;
                 if (drop_pct >= (float)cfg->breakage_drop_pct) {
                     st->breakage = true;
-                    st->breakage_latched = true;
                 }
             }
         }
@@ -152,7 +151,6 @@ static void transient_eval(alarm_state_t *st, const wear_cfg_t *cfg,
                 float rise_pct = (current - ref) / ref * 100.0f;
                 if (rise_pct >= (float)cfg->crash_rise_pct) {
                     st->crash = true;
-                    st->crash_latched = true;
                 }
             }
         }
@@ -208,16 +206,21 @@ void alarm_update(alarm_state_t *st, const spindle_cfg_t *cfg,
     }
 
     severity_t sev = SEV_NONE;
-    if (diag)                                         sev = SEV_DIAG;
-    if (st->trend)                                    sev = SEV_TREND;
-    if (warning)                                      sev = SEV_WARNING;
-    if (alarm)                                        sev = SEV_ALARM;
-    if (st->breakage || st->breakage_latched)         sev = SEV_BREAKAGE;
-    if (st->crash    || st->crash_latched)            sev = SEV_CRASH;
+    if (diag)          sev = SEV_DIAG;
+    if (st->trend)     sev = SEV_TREND;
+    if (warning)       sev = SEV_WARNING;
+    if (alarm)         sev = SEV_ALARM;
+    if (st->breakage)  sev = SEV_BREAKAGE;
+    if (st->crash)     sev = SEV_CRASH;
 
     st->severity    = sev;
     st->any_warning = warning || st->trend;
-    st->any_alarm   = alarm || st->breakage_latched || st->crash_latched;
+    /* Breakage/crash auto-clear along with the underlying transient,
+     * same as every band here — no acknowledgement step, per project
+     * requirement. (There used to be a breakage_latched/crash_latched
+     * pair requiring alarm_acknowledge() to clear; removed for
+     * consistency with the rest of the fault model.) */
+    st->any_alarm   = alarm || st->breakage || st->crash;
 }
 
 void alarm_on_cycle_end(alarm_state_t *st, const wear_cfg_t *cfg,
@@ -258,9 +261,6 @@ void alarm_acknowledge(alarm_state_t *st)
             }
         }
     }
-
-    if (!st->breakage) st->breakage_latched = false;
-    if (!st->crash)    st->crash_latched    = false;
 
     st->rising_cycles = 0;
     st->trend = false;

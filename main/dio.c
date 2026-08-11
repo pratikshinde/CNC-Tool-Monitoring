@@ -130,6 +130,14 @@ void dio_set(uint8_t index, bool active)
 
     if (o->forced) return;
 
+    if (active != o->requested) {
+        bool level = active ? (DO_ACTIVE_LEVEL != 0) : (DO_ACTIVE_LEVEL == 0);
+        if (o->invert) level = !level;
+        ESP_LOGI(TAG, "DO%u (GPIO%d) demand -> %s, physical %s",
+                 index, (int)k_out_pins[index],
+                 active ? "FAULT" : "clear", level ? "HIGH" : "LOW");
+    }
+
     o->requested = active;
 
     if (!s_outputs_enabled) return;

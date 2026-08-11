@@ -32,9 +32,9 @@ static bool quantity_fault(const do_map_input_t *in, unsigned s, quantity_t q)
     }
 
     if (q == QTY_CURRENT) {
-        if (a->breakage || a->breakage_latched) return true;
-        if (a->crash    || a->crash_latched)    return true;
-        if (a->trend)                           return true;
+        if (a->breakage) return true;
+        if (a->crash)    return true;
+        if (a->trend)    return true;
     }
     if (q == QTY_RPM && in->rpm_sensor_suspect[s]) return true;
 

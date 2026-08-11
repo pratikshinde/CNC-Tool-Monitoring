@@ -990,17 +990,24 @@ static void test_output_mapping(void)
     a0.bands[QTY_PRESSURE][BAND_LOLO].latched = false;
 
     /* Breakage/crash/wear-trend are current-signature conditions and must
-     * roll into the current quantity even with no band active. */
+     * roll into the current quantity even with no band active. Both
+     * auto-clear the moment the transient itself clears — there is no
+     * latch requiring acknowledgement, per project requirement (there used
+     * to be a breakage_latched/crash_latched pair; removed). */
     a0.breakage = true;
     do_map_evaluate(&qc, &in, out);
     CHECK(out[0], "breakage reaches the current+RPM output");
     CHECK(!out[1], "breakage must not reach the pressure-only output");
     a0.breakage = false;
-
-    a0.crash_latched = true;
     do_map_evaluate(&qc, &in, out);
-    CHECK(out[0], "a latched crash reaches the current+RPM output");
-    a0.crash_latched = false;
+    CHECK(!out[0], "breakage clears automatically once the transient passes, no acknowledgement needed");
+
+    a0.crash = true;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(out[0], "crash reaches the current+RPM output");
+    a0.crash = false;
+    do_map_evaluate(&qc, &in, out);
+    CHECK(!out[0], "crash clears automatically once the transient passes, no acknowledgement needed");
 
     a0.trend = true;
     do_map_evaluate(&qc, &in, out);

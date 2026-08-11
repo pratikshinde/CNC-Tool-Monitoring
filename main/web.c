@@ -9,8 +9,6 @@
  *   POST /api/config          apply WiFi/Modbus settings
  *   GET  /api/spindle         full per-spindle config (bands + calibration)
  *   POST /api/thresholds      apply one spindle's threshold bands
- *   GET  /api/outputs         all 4 digital output mappings
- *   POST /api/outputs         apply digital output mappings
  *   POST /api/calibration     apply one spindle's sensor setup / raw trims
  *   GET  /api/calib           calibration wizard state + live raw readings
  *   POST /api/calib           capture / apply / reset a calibration point
@@ -626,78 +624,6 @@ static esp_err_t handle_thresholds_post(httpd_req_t *req)
 }
 
 /* ============================================================
- * GET / POST /api/outputs   (digital output mapping, all 4 at once)
- *
- * Unlike thresholds/calibration this is not per-spindle: do_cfg_t is a flat
- * NUM_DIGITAL_OUT array, so both the wire format and the UI treat it as one
- * table rather than something selected per spindle.
- * ============================================================ */
-
-static void add_output(cJSON *arr, const do_cfg_t *d)
-{
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddNumberToObject(o, "source", d->source);
-    cJSON_AddNumberToObject(o, "spindle", d->spindle);
-    cJSON_AddNumberToObject(o, "quantity_mask", d->quantity_mask);
-    cJSON_AddBoolToObject(o, "invert", d->invert);
-    cJSON_AddNumberToObject(o, "min_pulse_ms", d->min_pulse_ms);
-    cJSON_AddItemToArray(arr, o);
-}
-
-static esp_err_t handle_outputs_get(httpd_req_t *req)
-{
-    const app_config_t *cfg = config_get();
-
-    cJSON *root = cJSON_CreateObject();
-    cJSON *arr = cJSON_AddArrayToObject(root, "outputs");
-    for (int d = 0; d < NUM_DIGITAL_OUT; d++) {
-        add_output(arr, &cfg->dout[d]);
-    }
-
-    return send_json(req, root);
-}
-
-static esp_err_t handle_outputs_post(httpd_req_t *req)
-{
-    char *body = read_body(req);
-    if (!body) return ESP_OK;
-
-    cJSON *root = cJSON_Parse(body);
-    free(body);
-    if (!root) return send_json_error(req, "invalid JSON");
-
-    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "outputs");
-    if (!cJSON_IsArray(arr)) {
-        cJSON_Delete(root);
-        return send_json_error(req, "missing outputs array");
-    }
-
-    app_config_t working;
-    config_get_copy(&working);
-
-    int n = cJSON_GetArraySize(arr);
-    if (n > NUM_DIGITAL_OUT) n = NUM_DIGITAL_OUT;
-
-    for (int d = 0; d < n; d++) {
-        cJSON *o = cJSON_GetArrayItem(arr, d);
-        if (!cJSON_IsObject(o)) continue;
-
-        do_cfg_t *dst = &working.dout[d];
-        cJSON *item;
-        if ((item = cJSON_GetObjectItemCaseSensitive(o, "source")) && cJSON_IsNumber(item)) {
-            dst->source = (do_source_t)item->valueint;
-        }
-        set_u8(o, "spindle", &dst->spindle);
-        set_u8(o, "quantity_mask", &dst->quantity_mask);
-        set_bool(o, "invert", &dst->invert);
-        set_u16(o, "min_pulse_ms", &dst->min_pulse_ms);
-    }
-
-    cJSON_Delete(root);
-    return commit_and_reply(req, &working, false);
-}
-
-/* ============================================================
  * POST /api/calibration?spindle=N   (sensor setup and raw trims)
  * ============================================================ */
 
@@ -1038,8 +964,6 @@ esp_err_t web_init(const app_config_t *cfg)
         { .uri = "/api/config",        .method = HTTP_POST, .handler = handle_config_post },
         { .uri = "/api/spindle",       .method = HTTP_GET,  .handler = handle_spindle_get },
         { .uri = "/api/thresholds",    .method = HTTP_POST, .handler = handle_thresholds_post },
-        { .uri = "/api/outputs",       .method = HTTP_GET,  .handler = handle_outputs_get },
-        { .uri = "/api/outputs",       .method = HTTP_POST, .handler = handle_outputs_post },
         { .uri = "/api/calibration",   .method = HTTP_POST, .handler = handle_calibration_post },
         { .uri = "/api/calib",         .method = HTTP_GET,  .handler = handle_calib_get },
         { .uri = "/api/calib",         .method = HTTP_POST, .handler = handle_calib_post },

@@ -27,15 +27,16 @@ below — and the full Phase 4 Material UI SPA remains unbuilt.
 | RPM via PCNT | done, bench-verified (tachometer cross-check pending) |
 | Digital I/O with safe-state and pulse stretching | done |
 | Spindle state machine | done, host-tested |
-| Alarm engine: bands, delays, hysteresis, latching | done, host-tested |
-| Breakage / crash / wear-trend detection | done, host-tested, **defaults unvalidated** |
-| Digital output mapping: per-quantity masks (current/pressure/RPM, any combination, per spindle) | done, host-tested, UI-configurable |
+| Alarm engine: Lo/Hi thresholds, fixed hysteresis/delay, auto-clearing | done, host-tested, **bench-verified** |
+| Breakage / crash / wear-trend detection, auto-clearing (no acknowledgement) | done, host-tested, **defaults unvalidated** |
+| Digital output mapping: per-quantity masks (current/pressure/RPM, any combination, per spindle) | done, host-tested, **firmware-only, not UI-editable** |
 | WiFi (station + always-on fallback AP) | done |
 | Modbus RTU (RS485) + Modbus TCP, read-only telemetry registers | done |
 | Guided 2-point calibration (pressure) + 1-point + auto-zero (current) | done, bench-verified to ±1 bar within the calibrated span |
 | No-load current deadband | done |
-| Web UI: dashboard, trends, thresholds, outputs, calibration, comms, system | done, not the Phase 4 SPA |
+| Web UI: dashboard, trends, thresholds, calibration, comms, system | done, not the Phase 4 SPA |
 | OTA: browser-upload firmware update, project/version checked | done |
+| UART debug logging: band trip/clear events, digital output changes | done |
 | On-device data logging | **dropped** — flash budget does not support it |
 
 **Compiles clean against ESP-IDF v6.0.2.** `idf.py build` passes with zero
@@ -103,8 +104,9 @@ main/
   calib.[ch]       guided field calibration (2-point pressure, 1-point CT, auto-zero)
   trend.[ch]       5-minute RAM ring buffer for the live graph (not persisted)
   ota.[ch]         browser-upload firmware update into the spare OTA slot
-  web.[ch]         HTTP server: dashboard/trend/threshold/output-mapping/
-                   calibration/comms/system API, ~18 routes
+  web.[ch]         HTTP server: dashboard/trend/threshold/calibration/comms/
+                   system API, 16 routes. Digital output mapping
+                   (do_cfg_t) is firmware-only, no API for it.
   web/index.html   the multi-tab operator UI (embedded in firmware)
   main.c           bring-up
 host_test/         gcc test harness
@@ -178,9 +180,36 @@ why the state machine exists at all.
 isolation, every wiring fault would present as a critical process alarm.
 `alarm_update()` gates each quantity independently on its sensor status.
 
-**Acknowledging an active alarm does not silence it.** It is recorded as
-acknowledged, but the latch only releases once the condition has actually
-cleared.
+**Every fault clears itself automatically — nothing needs to be
+acknowledged.** This was a deliberate customer requirement, and it reaches
+further than just the threshold bands:
+
+- **Only one side of the band is used per quantity**, not the full
+  LoLo/Lo/Hi/HiHi set: current is over-current only (Hi), RPM is
+  under-speed only (Lo), pressure keeps both (Lo and Hi). The unused bands
+  stay in the data model — `alarm.c`/`do_map.c` are unchanged — just
+  disabled by default and not shown in the web UI.
+- **Hysteresis and on/off delay are fixed per quantity, not user-editable.**
+  They still do their job (stopping a noisy reading right at the limit
+  from chattering the output, and a momentary spike from tripping it
+  instantly) — they're just no longer exposed in the Thresholds tab, which
+  now shows only the limit and an enable checkbox for whichever band(s)
+  apply.
+- **Latching is off for every band by default**, so a threshold violation
+  clears itself the moment the reading returns to normal for its off-delay,
+  with no separate "acknowledge" step.
+- **Breakage/crash detection auto-clears the same way.** These used to have
+  their own separate latch (`breakage_latched`/`crash_latched` in
+  `alarm_state_t`) that only released via `alarm_acknowledge()` — a real gap
+  against the "no acknowledgement" requirement, since a single brief
+  breakage/crash transient would leave the output stuck asserted
+  indefinitely. That latch has been removed entirely; `any_alarm` now
+  follows `.breakage`/`.crash` directly, which are already recomputed fresh
+  every cycle.
+- The **Acknowledge alarms** button and `/api/acknowledge` still exist —
+  they matter if a band's `latching` is ever turned back on via a config
+  edit outside the simplified UI, but nothing in the shipped default
+  configuration needs them anymore.
 
 **Alarms are evaluated in the measurement task, not a separate one.** A
 queue between them would add a scheduling hop inside the 200 ms latency
@@ -189,20 +218,35 @@ was just produced. The real-time loop is pinned to core 0 so Wi-Fi and
 HTTP on core 1 cannot delay it.
 
 **Outputs are held in their safe state until the first complete
-measurement cycle.**
+measurement cycle**, and once a fault does assert, `min_pulse_ms` holds it
+for a minimum time (3 s on the current/RPM outputs by default) even if the
+underlying condition clears sooner — long enough for a PLC on a slow scan
+cycle to reliably catch it.
 
 **Digital outputs can watch any combination of quantities, not just an
 all-or-nothing per-spindle alarm.** `do_cfg_t.quantity_mask` (`app_config.h`)
 lets one output assert on current+RPM together while a separate output
-watches pressure alone, per spindle — the factory default now ships exactly
+watches pressure alone, per spindle — the factory default ships exactly
 that split (see Hardware notes) rather than the original SRS §2.1 preset,
 which used one of the four outputs for a system-healthy signal. That
 signal no longer exists on any physical output under the current default —
 all four are spoken for by per-spindle fault detection. A quantity counts
 as faulted using the same active-or-latched test `alarm.c` itself uses for
-its own roll-ups, plus breakage/crash/wear-trend folded into "current" and
-a suspect RPM sensor folded into "RPM" — both are current/RPM-signature
-conditions even though neither is a band violation on its own.
+its own band roll-ups, plus breakage/crash/wear-trend folded into "current"
+and a suspect RPM sensor folded into "RPM" — both are current/RPM-signature
+conditions even though neither is a band violation on its own. **This
+mapping is firmware-only** (`app_config.c`'s defaults) — there is no web UI
+for it; an earlier "Outputs" tab was tried and deliberately removed, since
+the output configuration is fixed for this project rather than something
+an operator needs to change from the browser.
+
+**UART debug logging** (`ESP_LOGI`, visible at the default log level — see
+`sdkconfig.defaults`): `monitor.c` logs every band assert/clear transition
+(spindle, quantity, band, live value, limit), and `dio.c` logs every actual
+digital-output demand change together with the resulting physical HIGH/LOW
+level and GPIO pin — enough to correlate "the board says fault" with "the
+pin actually went low" from the serial console alone, without needing the
+web UI.
 
 ---
 
@@ -272,15 +316,15 @@ conditions even though neither is a band violation on its own.
   | DI1 | 35 | spindle 2 RPM pulse, input-only, no internal pull-up |
   | DI2 | 13 | reserved |
   | DI3 | 27 | reserved |
-  | DO0 | 26 | spindle 1 current + RPM anomaly (factory default) |
+  | DO0 | 26 | spindle 1 current + RPM anomaly, min 3 s ON |
   | DO1 | 25 | spindle 1 pressure anomaly, **inverted** — normal = high |
-  | DO2 | 33 | spindle 2 current + RPM anomaly (factory default) |
+  | DO2 | 33 | spindle 2 current + RPM anomaly, min 3 s ON |
   | DO3 | 23 | spindle 2 pressure anomaly, **inverted** — normal = high |
 
-  DO0–DO3's *sources* (which quantities drive which output, and the
-  invert/min-pulse behaviour) are reconfigurable from the web UI's Outputs
-  tab without a reflash; the table above is only the factory default and
-  the physical pin each output lands on.
+  DO0–DO3's *sources* (which quantities drive which output, invert and
+  minimum-ON-time) are set in `app_config.c`'s defaults and are
+  **firmware-only** — fixed for this project per customer requirement, not
+  reconfigurable from the web UI. A reflash is required to change them.
 
 ---
 

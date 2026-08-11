@@ -177,7 +177,30 @@ static void monitor_task(void *arg)
             ai.quantity_faulted[QTY_PRESSURE] = (pr.status != SENSOR_OK);
             ai.quantity_faulted[QTY_RPM]      = rpm_suspect;
 
+            /* Snapshot band .active before the update so a transition can
+             * be logged below. alarm.c stays free of ESP-IDF/logging
+             * dependencies deliberately (it is host-tested pure C), so this
+             * lives here rather than inside alarm_update() itself. */
+            bool was_active[QTY_COUNT][BAND_COUNT];
+            for (int q = 0; q < QTY_COUNT; q++) {
+                for (int b = 0; b < BAND_COUNT; b++) {
+                    was_active[q][b] = rt->alarm.bands[q][b].active;
+                }
+            }
+
             alarm_update(&rt->alarm, sc, &ai, rt->sm.monitoring_armed, now);
+
+            for (int q = 0; q < QTY_COUNT; q++) {
+                for (int b = 0; b < BAND_COUNT; b++) {
+                    bool is_active = rt->alarm.bands[q][b].active;
+                    if (is_active != was_active[q][b]) {
+                        ESP_LOGI(TAG, "S%u %s %s %s (value %.2f, limit %.2f)",
+                                 i, quantity_str((quantity_t)q), band_str((band_t)b),
+                                 is_active ? "ASSERTED" : "cleared",
+                                 ai.value[q], sc->bands[q][b].limit);
+                    }
+                }
+            }
 
             /* --- Cycle boundary ------------------------------------- */
 
