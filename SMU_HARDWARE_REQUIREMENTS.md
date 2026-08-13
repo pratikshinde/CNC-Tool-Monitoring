@@ -92,15 +92,15 @@ PLC outputs) did not change, only the specific part number did.
                     │                        │  │                        │
                     │  4× fault/health       │  │  4× fault/health       │
                     │     outputs             │  │     outputs             │
-                    │  1× cycle-start/       │  │  1× cycle-start/       │
-                    │     fault-clear input  │  │     fault-clear input  │
+                    │  2× control inputs     │  │  2× control inputs     │
+                    │   (cycle start,        │  │   (cycle start,        │
+                    │    fault clear)        │  │    fault clear)        │
                     └───────────┬────────────┘  └──────────┬─────────────┘
                                 │▲                           │▲
                                 ▼│                           ▼│
                         PLC digital I/O                PLC digital I/O
                 (4× fault/health inputs,        (4× fault/health inputs,
-                 1× cycle-start/fault-clear      1× cycle-start/fault-clear
-                 output)                         output)
+                 2× control outputs)            2× control outputs)
 ```
 
 **Mounting**: both SMUs are daughter cards on the same board as the ESP32 (not
@@ -142,9 +142,17 @@ suppress a real fault.
   ESP32, one dedicated per SMU. **Not** a shared multi-drop bus — a wedged/glitched
   SMU on one bus must not be able to block telemetry from the other spindle. This
   was a deliberate trade of a few extra GPIO for fault isolation between spindles.
-- Standard mode (100 kHz) is more than sufficient — the ESP32 polls each SMU at
-  **2 Hz**, master-initiated. This is a telemetry/config channel only; nothing
+- Standard mode (100 kHz) is sufficient — the ESP32 polls each SMU at
+  **20 Hz (50 ms)**, master-initiated, set by the system requirement to report
+  a fault within 100 ms (50 ms SMU detection + 50 ms worst-case poll latency;
+  see firmware spec §3.1). A ~64-byte telemetry read at 100 kHz takes about
+  7 ms, so this is roughly 14% utilisation per bus. 400 kHz is available if
+  more headroom is wanted. This is a telemetry/config channel only; nothing
   safety-relevant crosses it (see §2.1 invariant).
+- **Slave addresses**: SMU 1 = `0x21`, SMU 2 = `0x22` (7-bit). Deliberately
+  different despite being on separate buses, so a swapped daughter card or
+  cross-wired bus fails to ACK at bring-up instead of silently reporting one
+  spindle's data as the other's.
 - **Signals per bus**: SDA, SCL (M2003FC1AE has native I²C hardware, 1 set —
   matches the SMU's single-bus requirement exactly, nothing left unused).
   Pull-ups per standard I²C practice
@@ -155,10 +163,16 @@ suppress a real fault.
   freely assignable via the ESP32 GPIO matrix.
 - **Protocol** (firmware-level, informational for PCB designer — no electrical
   impact): SMU acts as I²C slave exposing a fixed memory-mapped register block.
-  ESP32 writes a register pointer then reads the telemetry struct each 2 Hz poll;
+  ESP32 writes a register pointer then reads the telemetry struct each 20 Hz poll;
   config/threshold/calibration writes are event-driven. CRC8 both directions,
   reject-and-keep-last-known-good on mismatch — mirrors the validate-before-apply
   pattern already used in `config_store_commit()`.
+- **Configuration is the only thing that persists** ✅. The device stores no
+  historical data — no event log, no trend archive, no lifetime counters.
+  Everything it measures is volatile and is lost on power loss, by design;
+  sites needing history log it externally over Modbus RTU or TCP. This keeps
+  flash wear bounded and removes a whole class of storage-corruption failure
+  modes. See firmware spec §1.1.
 - **Calibration is stored redundantly, in two places** ✅: the ESP32's
   `config_store.c` (NVS) remains the canonical, web-UI-editable copy, same
   role it has today; the SMU additionally persists its own working copy
@@ -202,6 +216,24 @@ signal is already unipolar, unlike current):
   mutually exclusive population, not both live at once) and mirrored in
   firmware as a matching per-spindle pressure-mode setting in the web UI, so
   the scaling math always matches what's actually populated on the board.
+- **Mode sense pin — required** ✅: the jumper must, in addition to selecting
+  the analogue path, **tie a dedicated SMU GPIO high or low** to report which
+  way it is set. This is one extra pole on the jumper (or a second jumper
+  position ganged to the first) plus one signal trace, and it is not optional.
+
+  Without it, a jumper set one way and firmware configured the other produces
+  a reading that is wrong by a fixed scale factor while **every diagnostic
+  passes** — the loop is intact, the current is in range, the ADC is healthy,
+  and no band is violated at the wrong-but-plausible value. Worked example: in
+  4–20 mA mode a 4 mA loop across the 100 Ω burden gives 0.4 V, mapped
+  0.4–2.0 V onto 0–250 bar. Jumpered for current but configured for voltage,
+  firmware instead maps 0–1.98 V onto the same span, and a true zero-pressure
+  reading displays as roughly 50 bar. Nothing anywhere reports a fault.
+
+  With the sense pin, firmware compares it against the configured mode every
+  loop and, on mismatch, refuses to report pressure at all and de-energises
+  the health output. This is the one failure in the analogue chain that
+  firmware cannot otherwise detect about itself. See firmware spec §3.2.
 - **4–20 mA mode**: burden resistor **100 Ω** (0.4–2.0 V across 4–20 mA,
   2.1 V at the 21 mA over-range trip point — comfortably inside 0–3.3 V with
   headroom). Was 180 Ω on the original ADS1115 board, which produced 3.6 V at
@@ -238,9 +270,9 @@ signal is already unipolar, unlike current):
   application. This was already litigated once on the ESP32 side (`rpm.c`);
   same physics applies here.
 
-### 3.4 SMU ↔ PLC digital I/O — 4 outputs + 1 control input per SMU (10 signals total) ✅
+### 3.4 SMU ↔ PLC digital I/O — 4 outputs + 2 control inputs per SMU (12 signals total) ✅
 
-Per SMU, four direct, PLC-facing outputs plus one PLC-driven control input —
+Per SMU, four direct, PLC-facing outputs plus two PLC-driven control inputs —
 **not** relayed through the ESP32 in either direction:
 
 | Output | Asserted when |
@@ -257,39 +289,56 @@ established elsewhere in this design (`DO_ACTIVE_LEVEL` semantics in
 `board.h`): normally energised, de-energising on the specific condition each
 line represents.
 
-**Control input — Cycle Start / Fault Clear**:
-- One digital input per SMU, driven by the PLC/operator, carrying two related
-  functions: signalling the start of a machining cycle, and clearing/
-  acknowledging latched faults.
+**Control inputs — Machine Running and Fault Clear (2 per SMU)** ✅:
+- **Two** digital inputs per SMU, driven by the machine/PLC and the operator
+  respectively. **This is up from the single dual-function input previously
+  specified here** — giving each function its own line removes all timing
+  ambiguity between them, and an earlier draft that discriminated the two by
+  pulse width on one wire has been dropped.
+
+| Input | Drive | Asserted when |
+|---|---|---|
+| **Machine Running** | Machine / PLC, **continuous level** | The spindle is cutting. De-asserted when idle. |
+| **Fault Clear** | Operator pushbutton or PLC, **1 s pulse** | Clearing/acknowledging latched faults |
+
 - Carry forward the same opto-isolated, active-low electrical convention used
   for the RPM input (§3.3) and the ESP32's existing DI pins in `board.h`,
   including the external pull-up caveat if the chosen SMU pin has no internal
   one.
-- 🟡 **Firmware-level detail, does not change the hardware requirement**:
-  whether this is one signal driving both functions or needs to be
-  disambiguated by edge/level/hold-time, and how it interacts with the SMU's
-  own arming state machine (§2.1), needs to be defined before SMU firmware is
-  written. The hardware requirement is fixed regardless of the answer: one
-  more opto-isolated digital input per SMU.
+- **Machine Running must be a level, held for the duration of the cut**, not a
+  pulse. This is what lets the SMU read machine state instead of inferring it:
+  an earlier draft had to reconstruct end-of-cycle from the current and RPM
+  decay signature and distinguish that from tool breakage, which produces a
+  near-identical current drop. A level signal deletes that whole problem.
+  Wiring it as a pulse is not supported.
 
 **Electrical**: carry forward the existing convention from `board.h`
 (`DO_ACTIVE_LEVEL = 1`, driving an opto or relay output stage — M2003FC1AE
 GPIO is 3.3 V logic, PLC inputs are typically 24 V DC, so each output needs
 its own isolation/level-shift stage, same as the ESP32's current DO0–DO3; the
-new control input needs a matching opto input stage, same convention as the
-RPM input). **This requires 4 output stages + 1 input stage per SMU × 2 SMUs
-= 8 output stages + 2 input stages total** — the output-stage count matches
-the original single-board design (8), with 2 new input stages not previously
+two control inputs need matching opto input stages, same convention as the
+RPM input). **This requires 4 output stages + 2 input stages per SMU × 2 SMUs
+= 8 output stages + 4 input stages total** — the output-stage count matches
+the original single-board design (8), with 4 new input stages not previously
 accounted for. Confirm current/voltage rating needed against the target
 PLC's I/O card spec.
 
 ### 3.5 ESP32 ↔ PLC — unchanged ✅
 
-RS485 (Modbus RTU) + WiFi (Modbus TCP), as already implemented — carried
+RS485 (Modbus RTU) **and** WiFi (Modbus TCP) — **both always available and
+usable simultaneously by different clients**, as already implemented and carried
 forward as-is. `MB_UART_PORT_NUM` (UART2), RXD/TXD/DE-RE pins per existing
 `board.h`. This remains the path for **telemetry** (register-mapped current/
-pressure/RPM/severity/health, read-only) and **configuration** (web UI). It is
-explicitly **not** a fault-signalling path any more — see §2.1.
+pressure/RPM/severity/health/diagnostics, read-only) and **configuration**
+(web UI). It is explicitly **not** a fault-signalling path any more — see
+§2.1.
+
+It is, however, now the **sole route to historical data**: since the device
+retains nothing across power loss (§3.1), any site wanting trend history,
+alarm records, or lifetime statistics logs them from these registers. That
+raises the practical importance of the RS-485 wiring and the WiFi link —
+neither is optional infrastructure for a customer who cares about
+predictive maintenance. Register map: `MODBUS_REGISTER_MAP.md`.
 
 ### 3.6 Retired from this design ✅
 
@@ -323,45 +372,90 @@ explicitly **not** a fault-signalling path any more — see §2.1.
   distributor-confirmed supply availability, see §1
 - 8× opto/relay output driver stages (4 per SMU) — same count as the
   original single-board design, see §3.4
-- 2× opto input driver stages (1 per SMU) — new, for the cycle-start/
-  fault-clear control input, see §3.4
+- 4× opto input driver stages (2 per SMU) — new, for the machine-running and
+  fault-clear control inputs, see §3.4
 - I²C pull-up resistors ×2 pairs (one pair per bus)
 - Pressure burden resistor: **100 Ω** per channel, for the 4–20 mA population
   option (was 180 Ω — see §3.2, this is a fix, not just a carry-forward)
 - Pressure divider resistors (`PRESSURE_DIV_R_TOP_OHM`/`_BOT_OHM`, 80.6 kΩ/
   20 kΩ), for the 0–10 V population option, per channel (§3.2)
-- Jumper / 0 Ω populate option per pressure channel, to select between the
-  two population options above (§3.2)
+- Jumper per pressure channel, to select between the two population options
+  above — **must carry a second pole (or ganged position) driving a mode-sense
+  GPIO**, see §3.2
 - *Removed*: ADS1115 and its support components
 
 ---
 
 ## 6. Open items — resolve before release to fab
 
-1. 🟡 **Exact GPIO pin assignments** — this document now specifies the full
-   per-SMU signal count: 2× ADC (current, pressure) + 1× RPM capture input +
-   1× cycle-start/fault-clear input + 2× I²C (SDA/SCL) + 4× DO = **10 signal
-   pins per SMU**, comfortably inside the M2003FC1AE's 18 available I/O. Not
-   yet mapped to specific pin numbers. `board.h`'s existing numbering scheme
-   should be extended to cover the new assignments once layout is underway.
-2. 🟡 **SMU non-volatile calibration storage — mechanism, not decision** —
-   calibration is entered through the web UI (same as V1's UX) and stored
-   **redundantly in both places**: the ESP32's `config_store.c` (NVS, the
-   canonical/editable copy) and the SMU's own local Data Flash (its
-   autonomous fallback copy) — see §3.1. That split is now settled. What's
-   still open is the mechanism on the SMU side: confirming the M2003FC1AE's
-   Data Flash region size/wear characteristics are sufficient for this role
-   without an external EEPROM, and the write/sync protocol details (already
-   sketched in §3.1: event-driven, CRC8, reject-and-keep-last-known-good).
-   Needs confirming during SMU firmware bring-up; not expected to require an
-   extra part.
-3. 🟡 **Cycle-start/fault-clear signal semantics** (§3.4) — one input serves
-   both "cycle start" and "fault clear/acknowledge." Exact triggering
-   behaviour (single signal vs. needing to be split, edge- vs level-
-   triggered, interaction with the SMU's local arming state machine) needs
-   firmware-side definition before SMU firmware is written. Does not block
-   PCB layout — the hardware requirement (one opto-isolated DI per SMU) is
-   fixed regardless of the answer.
+1. ✅ **SMU pin assignment — settled.** Verified against the M2003 Series
+   datasheet (Rev 1.00, Apr 2024), §4.1 pin diagrams and multi-function
+   tables. All 20 pins of the TSSOP20 package are accounted for, with one
+   spare.
+
+   | Pin | Port | Signal | Alt-function used |
+   |---|---|---|---|
+   | 1 | PB.1 | RPM pulse input | `ECAP0_IC0` |
+   | 2 | PB.2 | Current (CT) | `ADC0_CH2` |
+   | 3 | PB.3 | Pressure | `ADC0_CH3` |
+   | 4 | PE.15 | **nRESET** | — |
+   | 5 | PB.4 | Current fault output | GPIO |
+   | 6 | PB.5 | Pressure fault output | GPIO |
+   | 7 | — | **VSS** | — |
+   | 8 | PF.0 | **ICE_DAT** | — |
+   | 9 | — | **VDD** | — |
+   | 10 | PC.14 | *spare* | — |
+   | 11 | PB.15 | Pressure mode sense input | GPIO |
+   | 12 | PB.14 | Debug UART RX | `UART0_RXD` |
+   | 13 | PB.13 | Debug UART TX | `UART0_TXD` |
+   | 14 | PB.12 | RPM fault output | GPIO |
+   | 15 | PB.7 | SMU healthy output | GPIO |
+   | 16 | PB.8 | I²C SDA | `I2C0_SDA` |
+   | 17 | PB.9 | I²C SCL | `I2C0_SCL` |
+   | 18 | PF.1 | **ICE_CLK** | — |
+   | 19 | PB.11 | Machine Running input | GPIO |
+   | 20 | PB.0 | Fault Clear input | GPIO |
+
+   **Debug UART moved to pins 12/13 from the originally proposed 10/11.**
+   Two findings forced this, both from the datasheet's own tables:
+
+   - **Pin 11 (PB.15) cannot be a UART receive pin.** It carries
+     `UART0_TXD` and `UART0_nCTS`, but no `UART0_RXD`.
+   - **Pin 10 (PC.14) is ambiguous in the datasheet itself.** Both pin
+     *diagrams* (TSSOP and QFN, §4.1.2) list `UART0_TXD` on PC.14, while
+     both *tables* for the same packages omit it entirely, giving only
+     `PWM0_CH5 / USCI0_CTL0 / TM1 / TM3_EXT`. Rather than gamble on which
+     half of the datasheet is right, the UART was moved to pins where the
+     tables are unambiguous.
+
+   Pins 12 (`UART0_RXD`) and 13 (`UART0_TXD`) are confirmed in the tables
+   and are adjacent, which suits a debug header. Pin 10 becomes the spare —
+   if the diagrams turn out to be correct, it is a second UART TX in
+   reserve.
+
+   The four fault outputs and the pressure-sense input are plain GPIO and
+   were placed in what remained; the PCB designer may permute them freely
+   among pins 5, 6, 10, 11, 14, 15 to suit opto-driver placement. Note that
+   pins 5/6 also carry `ADC0_CH4/CH5` and pin 14 carries `ADC0_CH12` — using
+   them as digital outputs forfeits nothing, since only two ADC channels are
+   needed and both are already assigned.
+
+   `board.h`'s existing numbering scheme should be extended to cover the
+   ESP32-side assignments once layout is underway.
+2. 🟡 **SMU Data Flash region size** — calibration is stored redundantly in
+   the ESP32's NVS (canonical) and the SMU's own Data Flash (autonomous
+   fallback), see §3.1; that split is settled, as is the two-slot write
+   scheme. **Endurance is no longer a concern**: writes are event-driven at
+   commissioning only — tens to low hundreds over the product's life —
+   against an expected ≥100,000 erase/write cycles, so there are four orders
+   of magnitude of headroom. Only the available region *size* still needs
+   confirming during firmware bring-up. No external EEPROM is budgeted and
+   none is expected to be needed.
+
+**Resolved since the last revision**: control-input semantics — now two
+separate inputs, a **Machine Running level** and a **1 s Fault Clear pulse**
+(§3.4, firmware behaviour in firmware spec §3.3) — and the pressure jumper
+mode-sense pin (adopted, §3.2).
 
 ---
 
