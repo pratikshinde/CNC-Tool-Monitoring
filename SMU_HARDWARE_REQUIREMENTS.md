@@ -115,6 +115,7 @@ only the ESP32↔SMU link is short/on-board.
 | Networking (WiFi, HTTP, OTA) | ✅ Owns | — |
 | Modbus RTU (RS485) + TCP, external-facing | ✅ Owns | — |
 | Web UI, config store, threshold/calibration editing | ✅ Owns | — |
+| Threshold/calibration storage | ✅ Canonical copy (NVS) | ✅ Redundant local copy (Data Flash), for autonomy — see §3.1 |
 | Current / pressure ADC acquisition | — (removed) | ✅ Owns |
 | RPM pulse counting | — (removed) | ✅ Owns |
 | Spindle arming state machine (CUTTING detection) | — | ✅ Owns, local copy |
@@ -158,6 +159,17 @@ suppress a real fault.
   config/threshold/calibration writes are event-driven. CRC8 both directions,
   reject-and-keep-last-known-good on mismatch — mirrors the validate-before-apply
   pattern already used in `config_store_commit()`.
+- **Calibration is stored redundantly, in two places** ✅: the ESP32's
+  `config_store.c` (NVS) remains the canonical, web-UI-editable copy, same
+  role it has today; the SMU additionally persists its own working copy
+  locally in Data Flash (see §6 item 2) once it receives and validates a
+  write over this link. This is a deliberate redundancy, not just a cache —
+  it's what lets the SMU keep computing correct alarm state entirely on its
+  own, on last-known-good calibration, through an I2C link loss or extended
+  ESP32 downtime, consistent with the §2.1 autonomy invariant. On
+  reconnect/boot, the ESP32 re-pushes its NVS copy to the SMU so the two
+  stay in sync; the SMU's local copy is what it falls back to if that push
+  never arrives.
 
 ### 3.2 SMU analogue inputs ✅
 
@@ -332,15 +344,17 @@ explicitly **not** a fault-signalling path any more — see §2.1.
    pins per SMU**, comfortably inside the M2003FC1AE's 18 available I/O. Not
    yet mapped to specific pin numbers. `board.h`'s existing numbering scheme
    should be extended to cover the new assignments once layout is underway.
-2. 🟡 **SMU non-volatile calibration storage mechanism** — calibration is
-   entered through the web UI (same as V1's UX, relayed to the SMU over I²C
-   the same way thresholds are — see §3.1), so the *config path* is settled.
-   Still open: where the SMU itself persists those values locally across
-   power loss (mirroring `config_store.c`'s role on the ESP32). Nuvoton parts
-   typically support a reserved Data Flash region for this without an
-   external EEPROM; needs confirming against the M2003FC1AE specifically
-   during SMU firmware bring-up. Not expected to require an extra part,
-   flagged for awareness only.
+2. 🟡 **SMU non-volatile calibration storage — mechanism, not decision** —
+   calibration is entered through the web UI (same as V1's UX) and stored
+   **redundantly in both places**: the ESP32's `config_store.c` (NVS, the
+   canonical/editable copy) and the SMU's own local Data Flash (its
+   autonomous fallback copy) — see §3.1. That split is now settled. What's
+   still open is the mechanism on the SMU side: confirming the M2003FC1AE's
+   Data Flash region size/wear characteristics are sufficient for this role
+   without an external EEPROM, and the write/sync protocol details (already
+   sketched in §3.1: event-driven, CRC8, reject-and-keep-last-known-good).
+   Needs confirming during SMU firmware bring-up; not expected to require an
+   extra part.
 3. 🟡 **Cycle-start/fault-clear signal semantics** (§3.4) — one input serves
    both "cycle start" and "fault clear/acknowledge." Exact triggering
    behaviour (single signal vs. needing to be split, edge- vs level-
