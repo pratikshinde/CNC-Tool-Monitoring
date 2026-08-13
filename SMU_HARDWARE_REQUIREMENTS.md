@@ -15,47 +15,54 @@ a 423 ms average measurement cycle against a 100–200 ms requirement — the AD
 problem.
 
 This redesign moves acquisition, fault detection, and PLC signalling onto two
-dedicated **Spindle Monitoring Units (SMUs)** — one Nuvoton M031FB0AE per spindle —
+dedicated **Spindle Monitoring Units (SMUs)** — one Nuvoton M2003FC1AE per spindle —
 with the ESP32 retained as **Master**, owning networking, configuration, the web
 UI, and the external PLC/SCADA-facing Modbus interface.
 
-**Chosen part: Nuvoton M031FB0AE** (Cortex-M0, 16 KB Flash / 2 KB RAM, TSSOP20,
-7-ch 12-bit 2 MSPS ADC, 2× I²C, 3× UART). No analogue comparator on this variant —
-verified against Nuvoton's own selection guide, not the product page summary.
-Fault detection is done digitally, in firmware, not via hardware comparator trip.
+**Chosen part: Nuvoton M2003FC1AE** (Cortex-M23, no TrustZone, 24 MHz, 32 KB
+Flash / 4 KB RAM, TSSOP20, 8-ch 12-bit 500 kSPS ADC, 1× I²C, native RS-485
+UART). No analogue comparator or DAC — verified against the actual datasheet
+(no dedicated ACMP section anywhere in it, and the peripheral summary
+explicitly lists only ADC + PWM), not just the product-page summary. Fault
+detection is done digitally, in firmware, not via hardware comparator trip.
 
-**Alternative part, not yet chosen: Nuvoton M2003FC1AE.** Same TSSOP20
-footprint and price class, verified against the actual datasheet (not the
-product-page summary) the same way M031FB0AE was:
+**Decision driver: supply availability.** M2003FC1AE was confirmed by a
+distributor as high-availability; that settles the choice over the
+previously-considered alternative below. This is a supply-chain decision, not
+a functional one — see the comparison table for the (minor) technical
+trade-offs, none of which block any requirement in this document.
 
-| | M031FB0AE (chosen) | M2003FC1AE (alternative) |
+**Alternative considered, not selected: Nuvoton M031FB0AE.** Same TSSOP20
+footprint and price class, verified against the actual datasheet the same way
+M2003FC1AE was:
+
+| | M2003FC1AE (chosen) | M031FB0AE (alternative, not selected) |
 |---|---|---|
-| Core | Cortex-M0, 48 MHz | Cortex-M23 (no TrustZone), 24 MHz |
-| Flash / RAM | 16 KB / 2 KB | 32 KB / 4 KB |
+| Core | Cortex-M23 (no TrustZone), 24 MHz | Cortex-M0, 48 MHz |
+| Flash / RAM | 32 KB / 4 KB | 16 KB / 2 KB |
 | Package | TSSOP20 | TSSOP20 (same footprint) |
-| I/O pins | 15 | **18** |
-| ADC | 7-ch, 12-bit, 2 MSPS | 8-ch, 12-bit, 500 kSPS |
-| RPM-input peripheral | general-purpose 32-bit timer | **3-channel enhanced input capture** — purpose-built for pulse period/frequency measurement |
-| I²C | 2 sets | 1 set (SMU only needs 1) |
-| UART | 3 sets | up to 2 + 1 via USCI, native RS-485 (9-bit + auto direction) |
-| ACMP / DAC | none (verified) | none (verified — no dedicated ACMP section anywhere in the datasheet, and the peripheral summary explicitly lists only ADC + PWM) |
-| Voltage range | 1.8–3.6 V | 2.4–5.5 V (both cover 3.3 V comfortably) |
+| I/O pins | **18** | 15 |
+| ADC | 8-ch, 12-bit, 500 kSPS | 7-ch, 12-bit, 2 MSPS |
+| RPM-input peripheral | **3-channel enhanced input capture** — purpose-built for pulse period/frequency measurement | general-purpose 32-bit timer |
+| I²C | 1 set (SMU only needs 1) | 2 sets |
+| UART | up to 2 + 1 via USCI, native RS-485 (9-bit + auto direction) | 3 sets |
+| ACMP / DAC | none (verified) | none (verified against selection guide, not product page) |
+| Voltage range | 2.4–5.5 V | 1.8–3.6 V (both cover 3.3 V comfortably) |
+| Supply availability | **Confirmed high availability by distributor** — deciding factor | not checked against this criterion |
 
-Every SMU requirement in this document (§3.1–§3.4) is met by either part —
-this is not a functional blocker either way. M2003FC1AE's two concrete
-advantages for this specific application, on the identical package size, are
-more I/O headroom (18 vs 15) and a hardware input-capture peripheral that is
-a more natural fit for RPM pulse timing than a general-purpose timer. It is
-also pin-compatible with Nuvoton's N76E003/MS51/MG51 8051-based lines, which
-it's explicitly positioned to replace — a signal it is priced competitively
-for a design already optimising for moderate cost. Neither part has a
-hardware comparator, so this choice does not affect the "digital detection
-only, no ACMP trip" decision already made above.
+Every SMU requirement in this document (§3.1–§3.4) is met by either part, so
+availability was free to be the deciding factor without trading away any
+functional requirement. M2003FC1AE also happens to have two incidental
+technical advantages: more I/O headroom (18 vs 15) and a hardware
+input-capture peripheral that is a more natural fit for RPM pulse timing than
+a general-purpose timer. Neither part has a hardware comparator, so this
+choice does not affect the "digital detection only, no ACMP trip" decision
+already made above.
 
-**If M2003FC1AE is selected instead, every M031FB0AE reference in this
-document (§2 diagram, §3.1–§3.6, §5 BOM) should be read as M2003FC1AE** —
-the interface requirements themselves (I²C link, ADC channel count, RPM
-input, 4 PLC outputs) do not change; only the specific part number does.
+Every M031FB0AE reference that previously appeared in this document (§2
+diagram, §3.1–§3.6, §5 BOM) has been updated to M2003FC1AE below — the
+interface requirements themselves (I²C link, ADC channel count, RPM input, 4
+PLC outputs) did not change, only the specific part number did.
 
 ---
 
@@ -75,7 +82,7 @@ input, 4 PLC outputs) do not change; only the specific part number does.
                                 │                   │
                     ┌───────────▼──────────┐  ┌─────▼─────────────────┐
                     │  SMU 1 (Spindle 1)    │  │  SMU 2 (Spindle 2)    │
-                    │  M031FB0AE            │  │  M031FB0AE            │
+                    │  M2003FC1AE           │  │  M2003FC1AE           │
                     │                        │  │                        │
                     │  ADC: current, pressure│  │  ADC: current, pressure│
                     │  PCNT/GPIO: RPM pulse  │  │  PCNT/GPIO: RPM pulse  │
@@ -131,8 +138,9 @@ suppress a real fault.
 - Standard mode (100 kHz) is more than sufficient — the ESP32 polls each SMU at
   **2 Hz**, master-initiated. This is a telemetry/config channel only; nothing
   safety-relevant crosses it (see §2.1 invariant).
-- **Signals per bus**: SDA, SCL (M031 has native I²C hardware, 2 sets @ 1 MHz
-  per datasheet — either instance is fine). Pull-ups per standard I²C practice
+- **Signals per bus**: SDA, SCL (M2003FC1AE has native I²C hardware, 1 set —
+  matches the SMU's single-bus requirement exactly, nothing left unused).
+  Pull-ups per standard I²C practice
   (4.7 kΩ typical for short on-board traces at 100 kHz — PCB designer to confirm
   against actual trace length/capacitance).
 - **`I2C_NUM_0` is available** once the ADS1115 is removed (it currently occupies
@@ -147,8 +155,8 @@ suppress a real fault.
 
 ### 3.2 SMU analogue inputs — carried forward from the existing front end, one fix required 🟡
 
-Per SMU: 1× current channel, 1× pressure channel, both landing on the M031's
-internal 12-bit ADC (7 channels available, 2 used).
+Per SMU: 1× current channel, 1× pressure channel, both landing on the
+M2003FC1AE's internal 12-bit ADC (8 channels available, 2 used).
 
 **Current (CT)** — electrical spec unchanged from the current board:
 - CT ratio 30 A : 1 A (1000 mA secondary), burden resistor **0.1 Ω**, ×2 op-amp
@@ -156,10 +164,11 @@ internal 12-bit ADC (7 channels available, 2 used).
   constant, not a PCB requirement, but the burden/gain stage sizing must produce
   a signal in the SMU ADC's usable input range).
 - DC bias: **1.65 V nominal**, centring the AC waveform in the ADC's unipolar
-  input window. Confirm this still centres correctly against the M031's ADC
-  reference/range (design was originally sized for the ADS1115's ±2.048 V PGA
-  window at 3.3 V supply — needs re-verification against the M031's actual ADC
-  input characteristics, not just copied over).
+  input window. Confirm this still centres correctly against the
+  M2003FC1AE's ADC reference/range (design was originally sized for the
+  ADS1115's ±2.048 V PGA window at 3.3 V supply — needs re-verification
+  against the M2003FC1AE's actual ADC input characteristics, not just copied
+  over).
 - No-load cutoff and auto-zero tare are firmware concerns (`calib.c`), not PCB
   requirements.
 
@@ -189,16 +198,20 @@ internal 12-bit ADC (7 channels available, 2 used).
   depending on the ESP32 for arming state.
 - Carry forward the existing electrical convention: **opto-isolated, active-low
   at the MCU** (field pulse energises the opto, which pulls the MCU pin low).
-  If the input pin chosen on the M031 has no internal pull-up (check M031
-  datasheet per-pin), an **external 10 kΩ pull-up to 3.3 V is required** — this
-  bit the original design on the ESP32's input-only GPIO34/35 and is exactly
-  the kind of thing worth getting right the first time on the new board.
+  If the input pin chosen on the M2003FC1AE has no internal pull-up (check
+  M2003FC1AE datasheet per-pin), an **external 10 kΩ pull-up to 3.3 V is
+  required** — this bit the original design on the ESP32's input-only
+  GPIO34/35 and is exactly the kind of thing worth getting right the first
+  time on the new board.
 - Speed range: up to ~24,000 RPM at 1 PPR was the original design target
-  (`AI-R10` in the original SRS). Whatever glitch-filter/debounce the M031's
-  GPIO or timer peripheral offers, do not configure it above ~12 µs — 5 ms of
-  debounce (the original, since-amended SRS figure) would cap measurable speed
-  at 12,000 RPM at 1 PPR, which is wrong for this application. This was already
-  litigated once on the ESP32 side (`rpm.c`); same physics applies here.
+  (`AI-R10` in the original SRS). Land this input on the M2003FC1AE's
+  3-channel enhanced input-capture peripheral rather than a general-purpose
+  timer (see §1 comparison) — it is purpose-built for pulse period/frequency
+  measurement. Whatever glitch-filter/debounce it offers, do not configure it
+  above ~12 µs — 5 ms of debounce (the original, since-amended SRS figure)
+  would cap measurable speed at 12,000 RPM at 1 PPR, which is wrong for this
+  application. This was already litigated once on the ESP32 side (`rpm.c`);
+  same physics applies here.
 
 ### 3.4 SMU → PLC digital outputs ✅ (4 per SMU, 8 total)
 
@@ -212,9 +225,9 @@ Per SMU, four direct, PLC-facing outputs — **not** relayed through the ESP32:
 | **SMU healthy** | Normally energised; de-energises if the SMU hangs, resets, fails its own self-check, or loses power — same fail-safe inversion convention as the existing system-healthy output, so a dead board reads the same as a real fault to the PLC |
 
 **Electrical**: carry forward the existing convention from `board.h`
-(`DO_ACTIVE_LEVEL = 1`, driving an opto or relay output stage — M031 GPIO is
-3.3 V logic, PLC inputs are typically 24 V DC, so each output needs its own
-isolation/level-shift stage, same as the ESP32's current DO0–DO3). **This
+(`DO_ACTIVE_LEVEL = 1`, driving an opto or relay output stage — M2003FC1AE
+GPIO is 3.3 V logic, PLC inputs are typically 24 V DC, so each output needs
+its own isolation/level-shift stage, same as the ESP32's current DO0–DO3). **This
 requires 4 output stages per SMU × 2 SMUs = 8 total** — up from 4 on the
 original single-board design. Confirm current/voltage rating needed against
 the target PLC's input card spec.
@@ -251,8 +264,9 @@ explicitly **not** a fault-signalling path any more — see §2.1.
 
 ## 4. Power
 
-- SMUs share the main board's 3.3 V rail (M031 operating range 1.8–3.6 V — 3.3 V
-  matches the ESP32 rail and keeps I²C level-compatible with no shifting needed).
+- SMUs share the main board's 3.3 V rail (M2003FC1AE operating range 2.4–5.5 V
+  — 3.3 V matches the ESP32 rail and keeps I²C level-compatible with no
+  shifting needed).
 - Each SMU's 4 PLC-facing outputs need their own isolation-stage supply
   considerations (opto/relay driver side) — same pattern as the existing DO
   stages, just ×2 the count.
@@ -261,8 +275,8 @@ explicitly **not** a fault-signalling path any more — see §2.1.
 
 ## 5. Bill-of-materials additions (from the single-board design)
 
-- 2× Nuvoton M031FB0AE (TSSOP20) — or 2× **M2003FC1AE** (same package/pin
-  count class, see §1 for the comparison); part selection is not yet final
+- 2× Nuvoton **M2003FC1AE** (TSSOP20) — chosen over M031FB0AE on
+  distributor-confirmed supply availability, see §1
 - 8× opto/relay output driver stages (4 per SMU) — was 4 total, now 8
 - I²C pull-up resistors ×2 pairs (one pair per bus)
 - Pressure burden resistor: **100 Ω** per channel (was 180 Ω — see §3.2, this
@@ -273,20 +287,21 @@ explicitly **not** a fault-signalling path any more — see §2.1.
 
 ## 6. Open items — resolve before release to fab
 
-1. 🟡 **Current-channel ADC input range/biasing on the M031** — the 1.65 V bias
-   and gain stage were originally sized for the ADS1115's PGA characteristics.
-   Needs re-verification against the M031's actual ADC input spec, not assumed
-   to transfer directly.
+1. 🟡 **Current-channel ADC input range/biasing on the M2003FC1AE** — the
+   1.65 V bias and gain stage were originally sized for the ADS1115's PGA
+   characteristics. Needs re-verification against the M2003FC1AE's actual ADC
+   input spec, not assumed to transfer directly.
 2. 🟡 **Exact GPIO pin assignments** — this document specifies functional
    requirements (2× I²C bus pairs on ESP32, 1× ADC + 1× RPM + I²C + 4× DO per
    SMU) but not final pin numbers. `board.h`'s existing numbering scheme should
    be extended to cover the new assignments once layout is underway.
 3. 🟡 **SMU non-volatile calibration storage** — the SMU needs somewhere to
    persist its own threshold/calibration values across power loss (mirroring
-   `config_store.c`'s role on the ESP32). M031 parts typically support a
+   `config_store.c`'s role on the ESP32). Nuvoton parts typically support a
    reserved Data Flash region for this without an external EEPROM; needs
-   confirming during SMU firmware bring-up. Not expected to require an extra
-   part, flagged for awareness only.
+   confirming against the M2003FC1AE specifically during SMU firmware
+   bring-up. Not expected to require an extra part, flagged for awareness
+   only.
 4. 🟡 **Fault-output rollup mapping** (§3.4) — confirm before SMU firmware
    starts, does not block PCB layout.
 
