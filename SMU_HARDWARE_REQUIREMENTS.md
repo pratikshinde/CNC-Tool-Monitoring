@@ -442,15 +442,26 @@ predictive maintenance. Register map: `MODBUS_REGISTER_MAP.md`.
 
    `board.h`'s existing numbering scheme should be extended to cover the
    ESP32-side assignments once layout is underway.
-2. 🟡 **SMU Data Flash region size** — calibration is stored redundantly in
-   the ESP32's NVS (canonical) and the SMU's own Data Flash (autonomous
-   fallback), see §3.1; that split is settled, as is the two-slot write
-   scheme. **Endurance is no longer a concern**: writes are event-driven at
-   commissioning only — tens to low hundreds over the product's life —
-   against an expected ≥100,000 erase/write cycles, so there are four orders
-   of magnitude of headroom. Only the available region *size* still needs
-   confirming during firmware bring-up. No external EEPROM is budgeted and
-   none is expected to be needed.
+2. ✅ **SMU calibration storage — settled, no external part needed.**
+   Calibration is stored redundantly in the ESP32's NVS (canonical) and on
+   the SMU itself (autonomous fallback), see §3.1. Verified against the
+   M2003 datasheet and TRM:
+
+   - The part has **no separately-configurable Data Flash region** and no
+     `DFBA` register (unlike M031). The TRM describes the 32 KB as
+     "Application ROM **with** Data Flash" — storage is APROM pages the
+     application reserves in its linker script and writes via IAP.
+   - **Page erase granularity is 512 B** across all embedded flash, which is
+     what sets the budget: the 296-byte config block occupies one page, and
+     the two-slot scheme therefore reserves **1 KB of the 32 KB APROM
+     (3.1%)**, leaving ~31 KB for code.
+   - **Endurance 100,000 cycles**, retention 50 years at 55 °C. Writes occur
+     at commissioning only — tens to low hundreds over the product's life —
+     so there are four orders of magnitude of headroom.
+
+   **No external EEPROM is required**, confirming the earlier BOM
+   assumption. The only remaining question is a build-time one: whether the
+   SMU firmware fits the ~31 KB that remains. That does not affect the PCB.
 
 **Resolved since the last revision**: control-input semantics — now two
 separate inputs, a **Machine Running level** and a **1 s Fault Clear pulse**

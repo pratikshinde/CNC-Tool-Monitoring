@@ -351,12 +351,47 @@ Per the hardware document, calibration is stored redundantly: the ESP32's NVS ho
 - On both slots failing: fall back to compiled-in safe defaults **and de-energise the health output**. Running on unknown calibration without saying so would be exactly the silent-wrongness failure this design exists to prevent.
 - Writes are event-driven (an ESP32 config push), never periodic — Data Flash has limited endurance and calibration changes at commissioning, not continuously.
 
-**Endurance is a non-issue** ✅. Writes happen at commissioning and on operator
-config changes, not periodically — realistically tens to low hundreds of
-writes over the product's life. Against an expected ≥100,000 erase/write
-cycles, the two-slot scheme has four orders of magnitude of headroom. Region
-*size* is still worth confirming on bring-up, but no external EEPROM is
-budgeted and none is expected to be needed.
+#### Flash budget — settled against the datasheet and TRM ✅
+
+**There is no separately-configurable Data Flash region on this part**, and no
+`DFBA` base-address register (unlike the M031 family, where one exists). The
+TRM describes the 32 KB as "Application ROM **with** Data Flash": data storage
+is simply APROM pages that the application reserves in its linker script and
+writes at runtime through the IAP registers (`FMC_ISPCMD` / `ISPADDR` /
+`ISPDAT` / `ISPTRG`). Nothing needs configuring — it needs *reserving*.
+
+| Fact | Value | Source |
+|---|---|---|
+| APROM | 32 KB | DS §6.4.2 |
+| LDROM (ISP loader) | 4 KB, separate — does not consume APROM | DS §6.4.2 |
+| **Page erase granularity** | **512 B, all embedded flash** | DS §6.4.2, TRM §6.4 |
+| Endurance | 100,000 cycles (guaranteed by design) | DS §9.3 |
+| Retention after 100 k cycles | 50 yr @ 55 °C, 25 yr @ 85 °C, 10 yr @ 105 °C | DS §9.3 |
+
+The 512 B page is the number that decides the budget, not the 296-byte struct:
+flash erases a whole page at a time, so a slot costs one page regardless of
+how little of it is used.
+
+```
+    smu_config_t          296 B   ->  fits one 512 B page (216 B spare)
+    two slots (A / B)   2 pages   =  1 KB reserved at the top of APROM
+    remaining for code           ~31 KB of 32 KB  (3.1% consumed)
+```
+
+**The 512 B page also validates the two-slot design rather than merely
+permitting it.** Erase is destructive and page-granular, so a single-slot
+store has a window — between erase and successful rewrite — in which no valid
+calibration exists anywhere on the SMU. Losing power inside that window would
+leave the board to come up on defaults. Alternating pages means the previous
+good copy is never erased until the new one is written and verified.
+
+Endurance is a non-issue at four orders of magnitude of headroom: writes
+happen at commissioning and on operator config changes, realistically tens to
+low hundreds over the product's life, against 100,000 cycles.
+
+🟡 **What remains is a build-time question, not a bring-up measurement**: the
+SMU firmware must fit in the ~31 KB left after reserving the two pages. That
+is answered by the first real link, not by probing silicon.
 
 ### 3.6 Self-check and watchdog ✅
 
@@ -791,19 +826,20 @@ Two lines run through all of these:
 
 ## 8. Open items
 
-| # | Item | Blocks | Ref |
-|---|---|---|---|
-| 1 | 🟡 Baseline/σ learning algorithm — window, validity, reset policy | SMU coding | Modbus doc §7 |
-| 2 | 🟡 Loop timing and soft-float burst cost at 24 MHz | SMU bring-up | §3.1, §4.2 |
-| 3 | 🟡 Data Flash *region size* on M2003FC1AE (endurance closed) | SMU bring-up | §3.5 |
+| # | Item | Blocks | Resolved by | Ref |
+|---|---|---|---|---|
+| 1 | 🟡 SMU firmware must fit ~31 KB APROM after the 1 KB storage reservation | SMU coding | First real link | §3.5 |
+| 2 | 🟡 Loop timing and soft-float RMS burst cost at 24 MHz | SMU bring-up | Measurement on silicon | §3.1, §4.2 |
 
-Item 1 is the last open design decision. Items 2–3 are measurements that can
-only be taken on real silicon.
+**All design decisions are closed.** Both remaining items are measurements
+against a real build: one at link time, one on the bench. Neither affects PCB
+layout, so hardware can proceed independently.
 
-**Closed in this revision**: SMU pin assignment (verified against the
+**Closed in recent revisions**: SMU pin assignment (verified against the
 datasheet, §3.7 — debug UART moved to pins 12/13); the I²C register map
 (`shared/smu_proto.h`, §5.2); Modbus rolling-window depths and float-vs-integer
-representation (Modbus doc §9).
+representation (Modbus doc §9); the adaptive wear baseline algorithm (§3.8);
+and the flash budget (§3.5 — 512 B pages, 1 KB reserved, no external EEPROM).
 
 **Closed since first draft**: cycle-start/fault-clear discrimination
 (superseded — two separate inputs, §3.3); end-of-cycle detection (**no longer
