@@ -765,6 +765,124 @@ there is provisional until the shared generated header of §5.2 exists.
 - **Pressure mode**: per-spindle 4–20 mA / 0–10 V selector, matching the hardware jumper (§3.2), with the mismatch diagnostic surfaced prominently if the sense pin is adopted.
 - **New — Machine Running enable**: per-spindle toggle (`machine_running_enabled` in the shared config) for whether the pin-19 level signal participates in arming (§3.3). Fault clear is always active and has no toggle. The panel should also show the live state of both inputs, so a miswired or stuck signal is diagnosable without a meter.
 
+### 5.5 UI quality bar — modern, responsive, polished ✅
+
+V2's UI is a deliberate step up from V1's. V1 was already respectable — CSS
+custom properties, light/dark, a responsive `auto-fit` grid — so this is an
+upgrade rather than a rewrite, and the existing structure is worth keeping.
+
+#### Delivery: two changes that pay for everything else ✅
+
+| | Today (V1) | V2 |
+|---|---|---|
+| Storage | `EMBED_TXTFILES` — compiled into the app binary | The **`web` LittleFS partition**, which `partitions.csv` already reserves at 512 KB and which is currently unused |
+| Encoding | Plain text, 42.5 KB | **Pre-compressed gzip**, served with `Content-Encoding: gzip` |
+
+Both are near-free wins that the project has already paid for architecturally
+and is simply not collecting:
+
+- **Gzip takes the current UI from 42.5 KB to 11.3 KB — 3.8×**, measured, not
+  estimated. Less flash, and noticeably faster first paint over the device's
+  own AP, which is the worst-case link and the one used during commissioning.
+- **Serving from the `web` partition realises OTA-R4**: the UI becomes
+  updatable independently of firmware. Right now a typo in the HTML costs a
+  full firmware reflash and consumes an OTA slot. The partition comment
+  already anticipates this ("gzipped SPA, UI-R2 budget 250 KB"); the
+  implementation just never followed.
+
+**Flash is therefore not the binding constraint.** Against a 250 KB gzipped
+budget, today's UI uses 11 KB. There is room for a genuinely rich interface,
+and no reason to compromise the design to save bytes.
+
+#### Hard constraints ✅
+
+- **Entirely self-contained. No external requests of any kind** — no CDN, no
+  webfonts, no analytics, no remote icons. These machines sit on isolated shop
+  networks, and the device's own AP has no route to the internet at all. A UI
+  with one CDN dependency is a UI that renders unstyled at the exact moment it
+  matters most. System font stack only.
+- **No build step.** The asset is authored as it ships (plus a gzip pass in
+  CMake). Introducing npm/bundlers to a firmware repo adds a toolchain that
+  must be reproducible years from now for a product with a long service life.
+- **Degrade, never blank.** A failed poll shows the last value marked stale
+  (§5.3), never a spinner over the whole page and never an empty screen. The
+  operator must always be able to see *something* and be told how old it is.
+
+#### Industrial usability rules ✅
+
+These are what separate "looks modern" from "works on a shop floor", and they
+are requirements rather than preferences:
+
+- **Colour is never the only signal.** Every state carries an icon or text
+  label alongside its colour. Red-green is the most common colour-vision
+  deficiency, this is safety-adjacent information, and shop lighting is often
+  poor.
+- **Touch targets ≥ 44 px**, with generous spacing. Operators wear gloves.
+- **High contrast, dark-first.** Panel-mounted and handheld screens are read
+  in bad light. Dark reduces glare; light mode stays available for bright
+  environments and printing.
+- **Tabular numerals** (`font-variant-numeric: tabular-nums`) on every live
+  reading, and **fixed-width containers** for values that update. At a 2 Hz
+  refresh, digits changing width makes the layout twitch, which reads as
+  instability in a device whose whole job is to look trustworthy.
+- **Status-first hierarchy.** "Is my machine OK?" must be answerable without
+  scrolling, on a phone, from arm's length. Detail is progressive: summary →
+  per-spindle → per-band.
+- **Staleness is visually loud.** A stale panel is visibly distinct from a
+  live one, per §5.3's data-quality rule. Silently showing 40-second-old
+  numbers as though they were current is the single worst thing this UI could
+  do.
+
+#### What V2 adds to show ✅
+
+The richer telemetry needs somewhere to live without cluttering the summary:
+per-SMU link state and firmware/reset info, the four-band editor restored in
+full, adaptive baseline state (learning / valid / rejected) with
+deviation-in-σ, live Machine Running and Fault Clear input states, pressure
+mode with its mismatch diagnostic, and instrument diagnostics kept visually
+separate from process alarms — the same separation §5.3 enforces on Modbus,
+carried into the UI so the two are never confused.
+
+A visual prototype of the dashboard is at `design/ui_prototype.html`, built
+against mock data to settle the design language before firmware exists.
+
+#### Framework decision: vanilla, not React ✅
+
+Recorded because it is the kind of question that gets asked again.
+
+**Flash is not the reason.** React + ReactDOM is roughly 45 KB gzipped
+(Preact ~4 KB), which fits the 250 KB budget without difficulty. Claiming
+otherwise would be dishonest. What it does mean is that React's baseline alone
+is about four times the entire current UI (11 KB gzipped) before a single
+feature is written.
+
+**The build step is the reason.** React in practice means JSX, a bundler, and
+`node_modules`. This is firmware for a machine tool with a long service life:
+in five years someone needs to change a threshold label, and the question
+becomes whether that lockfile still installs, on which Node version, with
+which transitive dependencies still published. Firmware repositories routinely
+outlive JavaScript toolchains. Today `main/web/index.html` is edited and it
+ships — that property is worth more in this context than it would be in a web
+application, and it is why "no build step" is listed as a hard constraint
+above rather than a preference.
+
+**Where a component model would genuinely help is one screen.** The V2
+thresholds editor is 3 quantities × 4 bands × 6 fields = **72 inputs**, with
+validation, dirty tracking and per-band enable/latch state. That is the single
+place the ergonomics would pay. Everything else — two spindle cards, seven
+tabs, a handful of forms — is handled comfortably by the ~1,100 lines of plain
+JavaScript already working and field-proven in V1.
+
+**Runtime performance argues in neither direction.** At 20 Hz across roughly
+ten changing values, direct DOM writes are already trivial; a virtual DOM
+would add overhead rather than remove it.
+
+**Decision**: vanilla JavaScript for V2. If the thresholds editor specifically
+proves unmanageable, the escape hatch is **Preact + htm** — about 5 KB gzipped
+combined, a component model with JSX-like syntax via tagged template literals,
+and **no build step**, inlined as a single file. Scope it to that screen rather
+than rewriting seven working tabs.
+
 ---
 
 ## 6. Failure modes
