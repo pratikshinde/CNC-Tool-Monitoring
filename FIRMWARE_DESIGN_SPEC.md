@@ -396,6 +396,166 @@ Two notes that matter for firmware bring-up:
   the two ADC channels. There is no second capture input to fall back on, so
   the RPM path has no spare — worth knowing before assuming one exists.
 
+### 3.8 Wear baseline learning ✅
+
+`wear_cfg_t` has carried `adaptive_k_warn = 3.0` and `adaptive_k_alarm = 5.0`
+since V1, and no code has ever read them. `trend_enabled` defaults to `false`
+with the comment *"needs a learned baseline first."* This section supplies the
+missing piece.
+
+The detector answers a different question from the threshold bands. Bands ask
+*"is this cut outside its absolute limits?"* — a safety question. The baseline
+asks *"is this cut different from how this job normally runs?"* — a wear
+question, and it can be answered long before any absolute limit is approached.
+
+#### The statistic ✅
+
+**Per-cycle mean current**, which `spindle_sm_take_cycle()` already produces
+as `cycle_summary_t.mean_current`. One value per completed cut. Mean rather
+than peak because peak is dominated by entry transients and is far noisier;
+mean integrates the whole cut and is where blunting shows up as steadily
+rising cutting force.
+
+#### The estimator: median and MAD, not mean and standard deviation ✅
+
+Collect `baseline_learn_cycles` admitted cycle means into a ring buffer, then:
+
+```
+    med     = median(samples)
+    MAD     = median(|samples[i] - med|)
+    sigma   = 1.4826 * MAD          /* consistent with std-dev for normal data */
+```
+
+Robust statistics are used deliberately. A single anomalous cycle during
+learning — a hard spot in the casting, a chip jam, an interrupted cut —
+inflates a conventional standard deviation, which widens the adaptive band,
+which **permanently desensitises the detector**. The median and MAD ignore up
+to half the samples being outliers, so one bad cut during commissioning cannot
+quietly blunt wear detection for the life of the installation.
+
+The cost is having to keep the samples rather than accumulating incrementally:
+`baseline_learn_cycles × 4` bytes per SMU, 80 bytes at the default of 20 and
+256 bytes at the maximum of 64. Affordable against 4 KB, and worth it.
+
+#### Learn, then freeze — the central decision ✅
+
+**The baseline is computed once and frozen. It does not continuously adapt.**
+
+This is the decision that makes the detector work, and getting it wrong is the
+classic failure of adaptive thresholding: a baseline that keeps tracking the
+process will slowly follow a blunting tool upward, the deviation stays near
+zero, and the detector reports nothing while the tool wears out. It would look
+perfectly healthy and detect nothing. An EWMA or rolling recomputation is
+therefore explicitly rejected here.
+
+The baseline is re-established only on an explicit trigger:
+
+| Trigger | Rationale |
+|---|---|
+| Power-on | Baseline is volatile (§1.1) |
+| `SMU_CMD_RELEARN_BASELINE` | Operator/SCADA request |
+| `SMU_CMD_RESET_TOOL_STATS` | New tool — the old baseline describes the old tool |
+| Committed config change touching current calibration or the SM thresholds | A baseline in amps is meaningless if the amps scale changed |
+
+#### Sample admission ✅
+
+A cycle contributes to learning only if **all** hold:
+
+1. it completed normally (Machine Running de-asserted; not a fault stop);
+2. no alarm, breakage, crash or trend condition was active during it;
+3. monitoring was armed for the whole cut;
+4. no diagnostic was set for the current channel.
+
+A baseline learned from faulted cycles describes a broken process, and every
+subsequent comparison inherits that. Cycles that fail admission are skipped
+silently — they do not reset progress, they simply do not count.
+
+#### Validity gates ✅
+
+Once the samples are in, the baseline is accepted only if the spread is
+usable:
+
+```
+    sigma_floor   = baseline_sigma_floor_pct   / 100 * med   /* default  2% */
+    sigma_ceiling = baseline_sigma_ceiling_pct / 100 * med   /* default 25% */
+
+    if (sigma < sigma_floor)   sigma = sigma_floor;          /* clamp up   */
+    if (sigma > sigma_ceiling) baseline_valid = false;       /* reject     */
+```
+
+- **The floor** stops a very repeatable process from producing `sigma → 0`,
+  which would collapse the adaptive band onto the mean and trip on measurement
+  noise every cycle. It mirrors the 2% guard already used in
+  `alarm_on_cycle_end()`'s rise detector, for the same reason.
+- **The ceiling** is a judgement that some processes are simply not repeatable
+  enough for adaptive monitoring. If cycle-to-cycle spread exceeds a quarter
+  of the mean, any band wide enough to avoid false trips is too wide to catch
+  wear. Better to declare the baseline invalid and say so than to publish a
+  number that cannot work.
+
+#### How it drives detection ✅
+
+With a valid baseline:
+
+```
+    deviation_sigma = (last_cycle_mean - baseline_median) / sigma
+
+    warn_limit  = baseline_median + adaptive_k_warn  * sigma   /* k = 3.0 */
+    alarm_limit = baseline_median + adaptive_k_alarm * sigma   /* k = 5.0 */
+```
+
+Both limits are **clamped to stay below the fixed `BAND_HI` limit** for
+current. An adaptive limit above the absolute limit is meaningless — the fixed
+band would have tripped first — and letting it drift above would imply a
+safety margin that does not exist.
+
+Exceeding a limit for **one** cycle raises nothing. The condition must persist
+for `trend_cycles` consecutive admitted cycles (default 3). At k = 3 the
+per-cycle false-positive rate on roughly normal data is a few tenths of a
+percent, which at industrial cycle rates is several nuisance alarms a week;
+requiring three consecutive occurrences makes that negligible while costing at
+most three cycles of detection latency on a process that degrades over
+hundreds.
+
+Severity follows the existing model: the adaptive detector raises `SEV_TREND`,
+below the `SEV_WARNING`/`SEV_ALARM` that the fixed bands raise. It feeds the
+current fault output through the same rollup as `breakage` and `crash` (§3.4).
+
+#### Behaviour while learning ✅
+
+Wear detection **degrades rather than disappears** during the learning window.
+The existing consecutive-rise detector in `alarm_on_cycle_end()` needs no
+baseline and stays active throughout, so a tool blunting during the first 20
+cycles is still caught — just less sensitively. Once the baseline matures the
+adaptive band takes over as the primary signal and the rise counter remains as
+a complementary one.
+
+`BASELINE_STATE` reports 0 (learning) throughout, and `DEVIATION_SIGMA` is not
+meaningful until it reads 1. Given §1.1, this window reopens after every power
+cycle.
+
+#### Configuration ✅
+
+Three new fields join the two that already exist:
+
+| Field | Default | Range |
+|---|---|---|
+| `baseline_learn_cycles` | 20 | 5–64 |
+| `baseline_sigma_floor_pct` | 2 | 1–20 |
+| `baseline_sigma_ceiling_pct` | 25 | 5–100 |
+| `adaptive_k_warn` | 3.0 | 1.0–10.0 (existing) |
+| `adaptive_k_alarm` | 5.0 | 1.0–20.0 (existing) |
+
+`app_config_validate()` must additionally enforce
+`adaptive_k_warn < adaptive_k_alarm` and
+`sigma_floor_pct < sigma_ceiling_pct`.
+
+🟡 **Implementation note**: these three fields are already carried in
+`shared/smu_proto.h`, but `wear_cfg_t` in `app_config.h` still needs them
+added, with a `CONFIG_SCHEMA_VERSION` bump, when the ESP32 side is migrated.
+That is deliberately not done on this branch, which still holds unmigrated V1
+firmware. `trend_enabled` can default to `true` once this lands.
+
 ---
 
 ## 4. Portability changes required in the shared modules
@@ -493,16 +653,16 @@ wire; they are deliberately not restated anywhere else, including here.
 | `0x0000` | R | 16 B | Identity: magic, protocol version, firmware version, reset cause/count, uptime, last command result |
 | `0x0100` | R | 72 B | Telemetry: sequence, status/diag flags, state, severity, current/pressure/RPM, per-band active+latched bitmaps, sensor status, output read-back, raw pre-scaling values, closed-cycle summary |
 | `0x0200` | W | 16 B | Commands: acknowledge, auto-zero, config commit/abort, tool-stat reset, baseline relearn, soft reset |
-| `0x0300` | R/W | 284 B | Config: calibration, detector parameters, and the full `bands[3][4]` |
+| `0x0300` | R/W | 296 B | Config: calibration, detector parameters, and the full `bands[3][4]` |
 
 Four decisions worth recording, three of which corrected the original sketch:
 
 - **The register pointer is 16-bit, not 8-bit.** The sketch assumed a 256-byte
   space. The band configuration array alone is 192 bytes and the config block
-  totals 284, so it does not fit — this was caught by computing the sizes
+  totals 296, so it does not fit — this was caught by computing the sizes
   rather than assuming them. Sixteen bits also lets telemetry grow without
   renumbering anything.
-- **CRC-16/CCITT replaces the sketched CRC8.** Over a 284-byte config block,
+- **CRC-16/CCITT replaces the sketched CRC8.** Over a 296-byte config block,
   CRC8's error detection is not worth the one byte saved on a link running at
   ~14% utilisation. Calibration silently corrupted in transit is precisely
   what this guards against.

@@ -27,7 +27,7 @@
  * Addressing: the register pointer is 16-BIT, big-endian, written as two
  * bytes before each read or write. An 8-bit pointer was the original
  * sketch and does not work — the band configuration array alone is 192
- * bytes, and the whole config block is 284, so the map does not fit in a
+ * bytes, and the whole config block is 296, so the map does not fit in a
  * 256-byte space. Sixteen bits also leaves room to extend telemetry
  * without renumbering anything.
  *
@@ -275,7 +275,7 @@ typedef struct __attribute__((packed)) {
 } smu_command_t;
 
 /* ============================================================
- * Configuration — SMU_REG_CONFIG, read/write, 284 bytes
+ * Configuration — SMU_REG_CONFIG, read/write, 296 bytes
  *
  * Two-phase write: the master writes the whole block, then issues
  * SMU_CMD_CONFIG_COMMIT. A partial write interrupted mid-transfer is
@@ -342,8 +342,21 @@ typedef struct __attribute__((packed)) {
     uint8_t  crash_rise_pct;
     uint16_t crash_window_ms;
     uint8_t  trend_enabled;
-    uint8_t  trend_cycles;
-    uint16_t _pad3;
+    uint8_t  trend_cycles;      /* consecutive cycles required to raise    */
+
+    /* Adaptive wear baseline (spec §3.8). The baseline is learned once
+     * over baseline_learn_cycles admitted cycles and then FROZEN — a
+     * baseline that keeps adapting would track a blunting tool upward and
+     * detect nothing. */
+    uint8_t  baseline_learn_cycles;      /* 5..64, default 20              */
+    uint8_t  baseline_sigma_floor_pct;   /* 1..20, default 2               */
+    uint8_t  baseline_sigma_ceiling_pct; /* 5..100, default 25; above this
+                                          * the process is too variable and
+                                          * the baseline is rejected       */
+    uint8_t  _pad3;
+    uint16_t _pad3b;
+    float    adaptive_k_warn;   /* median + k*sigma, trend warning         */
+    float    adaptive_k_alarm;  /* must exceed adaptive_k_warn             */
 
     /* Output behaviour */
     uint16_t min_pulse_ms;      /* minimum asserted time (DO-R4)           */
@@ -361,7 +374,7 @@ typedef struct __attribute__((packed)) {
  * CRC-16/CCITT-FALSE — poly 0x1021, init 0xFFFF, no reflection
  *
  * Chosen over the CRC8 in the original design sketch: the config block
- * is 284 bytes, and CRC8's error-detection over a payload that size is
+ * is 296 bytes, and CRC8's error-detection over a payload that size is
  * not worth the single byte saved on a link running at 16% utilisation.
  * Calibration corrupted in transit and silently accepted is precisely
  * what this guards against.
@@ -385,7 +398,7 @@ _Static_assert(sizeof(smu_ident_t)     == 16,  "ident must be 16 bytes");
 _Static_assert(sizeof(smu_telemetry_t) == 72,  "telemetry must be 72 bytes");
 _Static_assert(sizeof(smu_command_t)   == 16,  "command must be 16 bytes");
 _Static_assert(sizeof(smu_band_cfg_t)  == 16,  "band cfg must be 16 bytes");
-_Static_assert(sizeof(smu_config_t)    == 284, "config must be 284 bytes");
+_Static_assert(sizeof(smu_config_t)    == 296, "config must be 296 bytes");
 
 /* Each block must fit inside its window. */
 _Static_assert(sizeof(smu_ident_t)     <= SMU_REG_WINDOW,        "ident overruns window");

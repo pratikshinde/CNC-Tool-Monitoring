@@ -289,12 +289,28 @@ signal is wired.
 
 | Reg | Type | Name | Notes |
 |---|---|---|---|
-| 30420–30421 | f32 | `BASELINE_MEAN_A` | Learned reference for a healthy cut |
-| 30422–30423 | f32 | `BASELINE_SIGMA_A` | Spread of that reference |
+| 30420–30421 | f32 | `BASELINE_MEDIAN_A` | Learned reference for a healthy cut — a **median**, not a mean (see below) |
+| 30422–30423 | f32 | `BASELINE_SIGMA_A` | Robust spread, `1.4826 × MAD`, after floor/ceiling clamping |
 | 30424–30425 | f32 | `DEVIATION_SIGMA` | How many σ the last cycle sat from baseline — **the single best wear indicator here** |
 | 30426–30427 | f32 | `MARGIN_TO_HI_PCT` | Last cycle peak as % of the Hi limit |
-| 30428 | u16 | `BASELINE_SAMPLE_COUNT` | Cycles contributing to the baseline |
-| 30429 | u16 | `BASELINE_VALID` | 0 while still learning — **including after every power-on** |
+| 30428 | u16 | `BASELINE_SAMPLE_COUNT` | Admitted cycles collected so far |
+| 30429 | u16 | `BASELINE_STATE` | 0 learning, 1 valid, 2 rejected (spread above ceiling) |
+| 30430–30431 | f32 | `ADAPTIVE_WARN_LIMIT_A` | `median + k_warn × σ`, clamped below the fixed Hi band |
+| 30432–30433 | f32 | `ADAPTIVE_ALARM_LIMIT_A` | `median + k_alarm × σ`, same clamp |
+| 30434 | u16 | `ADAPTIVE_EXCEED_COUNT` | Consecutive cycles over the warn limit; raises at `trend_cycles` |
+
+> **`BASELINE_STATE = 2` is not a fault — it is the device declining to
+> guess.** It means cycle-to-cycle spread exceeded the configured ceiling
+> (default 25% of the median), so this process is not repeatable enough for
+> adaptive monitoring: any band wide enough to avoid false trips would be too
+> wide to catch wear. The fixed threshold bands continue to work normally.
+> Investigate the process rather than raising the ceiling.
+
+> **The baseline is frozen once learned, and that is deliberate.** It does not
+> track the process. A baseline that kept adapting would slowly follow a
+> blunting tool upward, hold `DEVIATION_SIGMA` near zero, and report a healthy
+> machine while the tool wore out. Re-learning happens only on power-on, tool
+> change, an explicit command (§8), or a calibration change.
 
 > **The baseline is relearned from scratch after every power cycle.** It lives
 > in RAM like everything else here, so `DEVIATION_SIGMA` — the strongest
@@ -311,10 +327,10 @@ signal is wired.
 
 | Reg | Type | Name |
 |---|---|---|
-| 30430–30431 | f32 | `MEAN_A_LAST_10_CYCLES` |
-| 30432–30433 | f32 | `MEAN_A_LAST_100_CYCLES` |
-| 30434–30435 | f32 | `PEAK_A_LAST_10_CYCLES` |
-| 30436–30437 | f32 | `CYCLE_TIME_MEAN_LAST_10` |
+| 30470–30471 | f32 | `MEAN_A_LAST_10_CYCLES` |
+| 30472–30473 | f32 | `MEAN_A_LAST_100_CYCLES` |
+| 30474–30475 | f32 | `PEAK_A_LAST_10_CYCLES` |
+| 30476–30477 | f32 | `CYCLE_TIME_MEAN_LAST_10` |
 
 **Counters — all since power-on, none persisted:**
 
