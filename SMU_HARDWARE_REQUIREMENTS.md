@@ -90,12 +90,17 @@ PLC outputs) did not change, only the specific part number did.
                     │  engine + local arming │  │  engine + local arming │
                     │  state machine         │  │  state machine         │
                     │                        │  │                        │
-                    │  4× direct PLC outputs │  │  4× direct PLC outputs │
+                    │  4× fault/health       │  │  4× fault/health       │
+                    │     outputs             │  │     outputs             │
+                    │  1× cycle-start/       │  │  1× cycle-start/       │
+                    │     fault-clear input  │  │     fault-clear input  │
                     └───────────┬────────────┘  └──────────┬─────────────┘
-                                │                            │
-                                ▼                            ▼
-                        PLC digital inputs           PLC digital inputs
-                    (current/pressure/RPM/health) (current/pressure/RPM/health)
+                                │▲                           │▲
+                                ▼│                           ▼│
+                        PLC digital I/O                PLC digital I/O
+                (4× fault/health inputs,        (4× fault/health inputs,
+                 1× cycle-start/fault-clear      1× cycle-start/fault-clear
+                 output)                         output)
 ```
 
 **Mounting**: both SMUs are daughter cards on the same board as the ESP32 (not
@@ -116,6 +121,7 @@ only the ESP32↔SMU link is short/on-board.
 | 4-band threshold engine (LoLo/Lo/Hi/HiHi × hysteresis/delay/latch) | — | ✅ Owns, full duplicate of `alarm.c` |
 | Breakage / crash / wear-trend detection | — | ✅ Owns |
 | **PLC fault signalling** | ❌ Retired — SMUs are the sole PLC signal path | ✅ Direct digital outputs, no ESP32 in the loop |
+| Cycle start / fault clear from PLC | ❌ Not in the loop | ✅ Direct digital input, no ESP32 in the loop |
 | Telemetry display, trend history, Modbus register exposure | ✅ Relays what SMU reports | Reports up to ESP32 |
 
 **Critical invariant, carried forward from the existing design philosophy** (see
@@ -153,41 +159,48 @@ suppress a real fault.
   reject-and-keep-last-known-good on mismatch — mirrors the validate-before-apply
   pattern already used in `config_store_commit()`.
 
-### 3.2 SMU analogue inputs — carried forward from the existing front end, one fix required 🟡
+### 3.2 SMU analogue inputs ✅
 
 Per SMU: 1× current channel, 1× pressure channel, both landing on the
 M2003FC1AE's internal 12-bit ADC (8 channels available, 2 used).
+
+**ADC input range: 0–3.3 V**, full-scale against the SMU's own 3.3 V rail —
+confirmed, resolves the range/biasing open item that previously blocked this
+section.
 
 **Current (CT)** — electrical spec unchanged from the current board:
 - CT ratio 30 A : 1 A (1000 mA secondary), burden resistor **0.1 Ω**, ×2 op-amp
   gain stage (`gain_correction = 0.506` in firmware — this is a calibration
   constant, not a PCB requirement, but the burden/gain stage sizing must produce
   a signal in the SMU ADC's usable input range).
-- DC bias: **1.65 V nominal**, centring the AC waveform in the ADC's unipolar
-  input window. Confirm this still centres correctly against the
-  M2003FC1AE's ADC reference/range (design was originally sized for the
-  ADS1115's ±2.048 V PGA window at 3.3 V supply — needs re-verification
-  against the M2003FC1AE's actual ADC input characteristics, not just copied
-  over).
+- DC bias: **1.65 V nominal** (mid-rail of the 0–3.3 V ADC input range),
+  centring the AC waveform in the ADC's unipolar input window — confirmed for
+  the M2003FC1AE, superseding the earlier "needs re-verification" note (this
+  design was originally sized for the ADS1115's ±2.048 V PGA window and has
+  now been re-checked against the M2003FC1AE's actual ADC input range instead
+  of just carried over).
 - No-load cutoff and auto-zero tare are firmware concerns (`calib.c`), not PCB
   requirements.
 
-**Pressure — 🟡 known defect, fix during this respin, do not carry forward as-is:**
-- Current burden resistor is **180 Ω**. At the full 20 mA loop scale that's
-  **3.6 V**, which exceeds the 3.3 V rail feeding the ADC — an over-voltage
-  condition on the ADC input pin regardless of PGA/reference setting, and it
-  defeats the over-range fault check (a shorted transmitter driving max loop
-  current may not read as a fault). This was flagged as an open defect against
-  the ADS1115 design and was never fixed on that board.
-  **For the SMU redesign: drop the burden to 100 Ω** (0.4–2.0 V across 4–20 mA,
-  2.1 V at the 21 mA over-range trip point — comfortably inside 3.3 V with
-  headroom).
-- Sensor range: 0–250 bar over the 4–20 mA loop (`sensor_min`/`sensor_max` in
-  firmware config — not a PCB constraint beyond the burden resistor above).
-- If a 0–10 V loop variant is ever fitted (see `PRESSURE_DIV_R_TOP_OHM` /
-  `_BOT_OHM` = 80.6 kΓ/20 kΩ in the current design), the same 3.3 V input
-  ceiling applies to the divider output — carry the same headroom-below-VDD
-  principle forward if this option is kept on the SMU.
+**Pressure** — dual-mode, jumper-selectable per channel, no DC bias (the
+signal is already unipolar, unlike current):
+- Two loop types supported: **4–20 mA current loop** and **0–10 V voltage
+  loop**, selected per channel via a **hardware jumper / populate option**
+  (burden resistor for current mode vs. voltage divider for voltage mode —
+  mutually exclusive population, not both live at once) and mirrored in
+  firmware as a matching per-spindle pressure-mode setting in the web UI, so
+  the scaling math always matches what's actually populated on the board.
+- **4–20 mA mode**: burden resistor **100 Ω** (0.4–2.0 V across 4–20 mA,
+  2.1 V at the 21 mA over-range trip point — comfortably inside 0–3.3 V with
+  headroom). Was 180 Ω on the original ADS1115 board, which produced 3.6 V at
+  full scale — an over-voltage condition on the ADC input that also defeated
+  the over-range fault check (a shorted transmitter driving max loop current
+  wouldn't have read as a fault). This is a fix, not a carry-forward.
+- **0–10 V mode**: resistive divider, same `PRESSURE_DIV_R_TOP_OHM` /
+  `_BOT_OHM` topology as the existing design (80.6 kΩ/20 kΩ), sized to keep
+  the divider output inside 0–3.3 V with headroom at 10 V input.
+- Sensor range: 0–250 bar (`sensor_min`/`sensor_max` in firmware config — not
+  a PCB constraint beyond the two population options above).
 
 ### 3.3 SMU RPM input ✅
 
@@ -213,32 +226,50 @@ M2003FC1AE's internal 12-bit ADC (8 channels available, 2 used).
   application. This was already litigated once on the ESP32 side (`rpm.c`);
   same physics applies here.
 
-### 3.4 SMU → PLC digital outputs ✅ (4 per SMU, 8 total)
+### 3.4 SMU ↔ PLC digital I/O — 4 outputs + 1 control input per SMU (10 signals total) ✅
 
-Per SMU, four direct, PLC-facing outputs — **not** relayed through the ESP32:
+Per SMU, four direct, PLC-facing outputs plus one PLC-driven control input —
+**not** relayed through the ESP32 in either direction:
 
 | Output | Asserted when |
 |---|---|
 | **Current fault** | Any current-band (Hi/HiHi) violation, OR breakage detection, OR crash detection, OR wear-trend alarm — all current-signature-derived conditions roll into this one line |
 | **Pressure fault** | Any pressure-band (LoLo/Lo/Hi/HiHi) violation |
-| **RPM anomaly** | Any RPM-band violation, OR the RPM-sensor-suspect diagnostic (current flowing but no pulses — a broken speed sensor, distinct from "spindle stopped") |
-| **SMU healthy** | Normally energised; de-energises if the SMU hangs, resets, fails its own self-check, or loses power — same fail-safe inversion convention as the existing system-healthy output, so a dead board reads the same as a real fault to the PLC |
+| **RPM fault** | Any RPM-band violation, OR the RPM-sensor-suspect diagnostic (current flowing but no pulses — a broken speed sensor, distinct from "spindle stopped") |
+| **SMU healthy** | Normally energised; de-energises if the SMU hangs, resets, fails its own self-check, or loses power — a dedicated status bit, separate from the three fault lines, so the PLC can distinguish "board dead" from "a specific quantity faulted" without having to notice all three fault lines going inactive at once |
+
+One dedicated output per monitored quantity plus one dedicated health line —
+this settles the fault-output rollup mapping that was previously an open
+item. All four outputs use the fail-safe inversion convention already
+established elsewhere in this design (`DO_ACTIVE_LEVEL` semantics in
+`board.h`): normally energised, de-energising on the specific condition each
+line represents.
+
+**Control input — Cycle Start / Fault Clear**:
+- One digital input per SMU, driven by the PLC/operator, carrying two related
+  functions: signalling the start of a machining cycle, and clearing/
+  acknowledging latched faults.
+- Carry forward the same opto-isolated, active-low electrical convention used
+  for the RPM input (§3.3) and the ESP32's existing DI pins in `board.h`,
+  including the external pull-up caveat if the chosen SMU pin has no internal
+  one.
+- 🟡 **Firmware-level detail, does not change the hardware requirement**:
+  whether this is one signal driving both functions or needs to be
+  disambiguated by edge/level/hold-time, and how it interacts with the SMU's
+  own arming state machine (§2.1), needs to be defined before SMU firmware is
+  written. The hardware requirement is fixed regardless of the answer: one
+  more opto-isolated digital input per SMU.
 
 **Electrical**: carry forward the existing convention from `board.h`
 (`DO_ACTIVE_LEVEL = 1`, driving an opto or relay output stage — M2003FC1AE
 GPIO is 3.3 V logic, PLC inputs are typically 24 V DC, so each output needs
-its own isolation/level-shift stage, same as the ESP32's current DO0–DO3). **This
-requires 4 output stages per SMU × 2 SMUs = 8 total** — up from 4 on the
-original single-board design. Confirm current/voltage rating needed against
-the target PLC's input card spec.
-
-🟡 **Open, needs firmware-side confirmation before layout is finalised**: the
-exact rollup rule above (which alarm-engine severities feed which output) is
-my proposed mapping based on the existing `alarm_state_t.bands[quantity][band]`
-structure, which already tracks state per-quantity — implementable without
-restructuring the alarm engine. Confirm this matches intent before firmware
-work starts on the SMU side; it doesn't block PCB layout (4 output stages
-either way) but should be confirmed before the SMU firmware is written.
+its own isolation/level-shift stage, same as the ESP32's current DO0–DO3; the
+new control input needs a matching opto input stage, same convention as the
+RPM input). **This requires 4 output stages + 1 input stage per SMU × 2 SMUs
+= 8 output stages + 2 input stages total** — the output-stage count matches
+the original single-board design (8), with 2 new input stages not previously
+accounted for. Confirm current/voltage rating needed against the target
+PLC's I/O card spec.
 
 ### 3.5 ESP32 ↔ PLC — unchanged ✅
 
@@ -267,9 +298,10 @@ explicitly **not** a fault-signalling path any more — see §2.1.
 - SMUs share the main board's 3.3 V rail (M2003FC1AE operating range 2.4–5.5 V
   — 3.3 V matches the ESP32 rail and keeps I²C level-compatible with no
   shifting needed).
-- Each SMU's 4 PLC-facing outputs need their own isolation-stage supply
-  considerations (opto/relay driver side) — same pattern as the existing DO
-  stages, just ×2 the count.
+- Each SMU's 3 PLC-facing fault outputs and 1 PLC-facing control input need
+  their own isolation-stage supply considerations (opto/relay driver side for
+  the outputs, opto input stage for the control input) — same pattern as the
+  existing DO/DI stages, adjusted for the new count (see §3.4).
 
 ---
 
@@ -277,33 +309,45 @@ explicitly **not** a fault-signalling path any more — see §2.1.
 
 - 2× Nuvoton **M2003FC1AE** (TSSOP20) — chosen over M031FB0AE on
   distributor-confirmed supply availability, see §1
-- 8× opto/relay output driver stages (4 per SMU) — was 4 total, now 8
+- 8× opto/relay output driver stages (4 per SMU) — same count as the
+  original single-board design, see §3.4
+- 2× opto input driver stages (1 per SMU) — new, for the cycle-start/
+  fault-clear control input, see §3.4
 - I²C pull-up resistors ×2 pairs (one pair per bus)
-- Pressure burden resistor: **100 Ω** per channel (was 180 Ω — see §3.2, this
-  is a fix, not just a carry-forward)
+- Pressure burden resistor: **100 Ω** per channel, for the 4–20 mA population
+  option (was 180 Ω — see §3.2, this is a fix, not just a carry-forward)
+- Pressure divider resistors (`PRESSURE_DIV_R_TOP_OHM`/`_BOT_OHM`, 80.6 kΩ/
+  20 kΩ), for the 0–10 V population option, per channel (§3.2)
+- Jumper / 0 Ω populate option per pressure channel, to select between the
+  two population options above (§3.2)
 - *Removed*: ADS1115 and its support components
 
 ---
 
 ## 6. Open items — resolve before release to fab
 
-1. 🟡 **Current-channel ADC input range/biasing on the M2003FC1AE** — the
-   1.65 V bias and gain stage were originally sized for the ADS1115's PGA
-   characteristics. Needs re-verification against the M2003FC1AE's actual ADC
-   input spec, not assumed to transfer directly.
-2. 🟡 **Exact GPIO pin assignments** — this document specifies functional
-   requirements (2× I²C bus pairs on ESP32, 1× ADC + 1× RPM + I²C + 4× DO per
-   SMU) but not final pin numbers. `board.h`'s existing numbering scheme should
-   be extended to cover the new assignments once layout is underway.
-3. 🟡 **SMU non-volatile calibration storage** — the SMU needs somewhere to
-   persist its own threshold/calibration values across power loss (mirroring
-   `config_store.c`'s role on the ESP32). Nuvoton parts typically support a
-   reserved Data Flash region for this without an external EEPROM; needs
-   confirming against the M2003FC1AE specifically during SMU firmware
-   bring-up. Not expected to require an extra part, flagged for awareness
-   only.
-4. 🟡 **Fault-output rollup mapping** (§3.4) — confirm before SMU firmware
-   starts, does not block PCB layout.
+1. 🟡 **Exact GPIO pin assignments** — this document now specifies the full
+   per-SMU signal count: 2× ADC (current, pressure) + 1× RPM capture input +
+   1× cycle-start/fault-clear input + 2× I²C (SDA/SCL) + 4× DO = **10 signal
+   pins per SMU**, comfortably inside the M2003FC1AE's 18 available I/O. Not
+   yet mapped to specific pin numbers. `board.h`'s existing numbering scheme
+   should be extended to cover the new assignments once layout is underway.
+2. 🟡 **SMU non-volatile calibration storage mechanism** — calibration is
+   entered through the web UI (same as V1's UX, relayed to the SMU over I²C
+   the same way thresholds are — see §3.1), so the *config path* is settled.
+   Still open: where the SMU itself persists those values locally across
+   power loss (mirroring `config_store.c`'s role on the ESP32). Nuvoton parts
+   typically support a reserved Data Flash region for this without an
+   external EEPROM; needs confirming against the M2003FC1AE specifically
+   during SMU firmware bring-up. Not expected to require an extra part,
+   flagged for awareness only.
+3. 🟡 **Cycle-start/fault-clear signal semantics** (§3.4) — one input serves
+   both "cycle start" and "fault clear/acknowledge." Exact triggering
+   behaviour (single signal vs. needing to be split, edge- vs level-
+   triggered, interaction with the SMU's local arming state machine) needs
+   firmware-side definition before SMU firmware is written. Does not block
+   PCB layout — the hardware requirement (one opto-isolated DI per SMU) is
+   fixed regardless of the answer.
 
 ---
 
