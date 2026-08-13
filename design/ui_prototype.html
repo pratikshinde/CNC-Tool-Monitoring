@@ -183,6 +183,133 @@ main{padding:16px;max-width:1180px;margin:0 auto}
 .chip.on{color:var(--ok);border-color:#3fb95040;background:var(--ok-bg)}
 .chip.on .dot{background:var(--ok);box-shadow:0 0 0 3px #3fb9502e}
 
+/* ============================================================
+   THRESHOLDS EDITOR
+   Replaces V1's 7-column table, which compressed each numeric input to
+   ~32 px at 375 px wide — two visible digits, and mis-entered limits
+   during a real test run.
+
+   Two changes fix it:
+   1. Progressive disclosure. Limit is the field that gets edited; the
+      other four are commissioning-time settings. Showing all six with
+      equal weight is what created the cramped grid.
+   2. One DOM, two layouts. Each band is a card that reflows into a row
+      on wide screens — no <table>, so nothing can compress below a
+      usable width.
+   ============================================================ */
+
+.qgroup{margin-bottom:16px}
+.qgroup-hd{display:flex;align-items:baseline;gap:9px;margin:0 0 9px;padding:0 2px}
+.qgroup-hd h3{font-size:14px;font-weight:650;margin:0;letter-spacing:-.01em}
+.qgroup-hd .live{font-size:12.5px;color:var(--text-faint)}
+.qgroup-hd .live b{color:var(--accent);font-weight:650}
+
+/* Column header — only meaningful in the wide/row layout. */
+.bhead{display:none}
+
+.band{
+  border:1px solid var(--border);border-radius:var(--r-sm);
+  background:var(--panel-2);margin-bottom:9px;overflow:hidden}
+.band.off{opacity:.55}
+.band-top{display:flex;align-items:center;gap:11px;padding:11px 13px}
+.band-name{font-size:14px;font-weight:650;min-width:52px}
+.band-top .spacer{margin-left:auto}
+
+/* Switch: 27 px of visible track, but a 44 px tappable area around it.
+   Looking right and being hittable with a glove are different problems. */
+.sw{position:relative;width:46px;min-height:44px;flex:none;cursor:pointer;
+  display:inline-flex;align-items:center}
+.sw input{position:absolute;inset:0;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.sw .track2{width:46px;height:27px;border-radius:999px;background:var(--border-strong);
+  transition:background .18s}
+.sw .knob{position:absolute;left:3px;top:50%;margin-top:-10.5px;
+  width:21px;height:21px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 3px #0006;transition:transform .18s}
+.sw input:checked + .track2{background:var(--ok)}
+.sw input:checked ~ .knob{transform:translateX(19px)}
+.sw input:focus-visible + .track2{outline:2px solid var(--accent);outline-offset:2px}
+
+/* The field that actually gets typed into. */
+.limit-row{padding:0 13px 12px;display:grid;gap:5px}
+.limit-row label{font-size:11px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-faint)}
+.inwrap{position:relative;display:flex;align-items:center}
+.inwrap input{
+  width:100%;
+  /* 16 px minimum: readable at arm's length, and stops mobile zoom-on-focus */
+  font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;
+  padding:12px 46px 12px 13px;   /* right pad clears the unit badge */
+  min-height:48px;               /* comfortably past the 44 px target */
+  background:var(--bg);color:var(--text);
+  border:1px solid var(--border-strong);border-radius:var(--r-sm);
+  font-family:inherit;-moz-appearance:textfield;
+}
+.inwrap input::-webkit-outer-spin-button,
+.inwrap input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.inwrap input:focus{outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 3px #4da3ff33}
+.inwrap input.bad{border-color:var(--alarm);box-shadow:0 0 0 3px #f8514933}
+.unit{position:absolute;right:12px;font-size:13px;font-weight:600;
+  color:var(--text-faint);pointer-events:none}
+.ref{font-size:12px;color:var(--text-faint);min-height:17px}
+.ref b{color:var(--text-dim);font-weight:600}
+.ref.bad{color:var(--alarm)}
+
+/* Advanced disclosure — hidden by default, which is the whole point. */
+.adv{border-top:1px solid var(--border)}
+.adv summary{
+  list-style:none;cursor:pointer;padding:11px 13px;min-height:44px;
+  display:flex;align-items:center;gap:7px;
+  font-size:12.5px;font-weight:600;color:var(--text-dim)}
+.adv summary::-webkit-details-marker{display:none}
+.adv summary .caret{transition:transform .18s;font-size:10px}
+.adv[open] summary .caret{transform:rotate(90deg)}
+.adv summary:hover{color:var(--text)}
+.advgrid{padding:0 13px 13px;display:grid;gap:11px;grid-template-columns:1fr 1fr}
+.advgrid .f{display:grid;gap:5px}
+.advgrid .f.wide{grid-column:1/-1;display:flex;align-items:center;gap:11px}
+.advgrid label{font-size:11px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-faint)}
+.advgrid .inwrap input{font-size:15px;min-height:44px;padding:10px 40px 10px 11px}
+
+.saverow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding-top:14px;margin-top:4px;border-top:1px solid var(--border)}
+.btn{
+  background:var(--accent);color:#04121f;border:0;border-radius:var(--r-sm);
+  padding:12px 20px;min-height:48px;font:inherit;font-size:15px;font-weight:650;
+  cursor:pointer}
+.btn:hover{filter:brightness(1.08)}
+.btn.sec{background:var(--panel-2);color:var(--text);border:1px solid var(--border-strong)}
+.errline{font-size:13px;color:var(--alarm);font-weight:600}
+
+/* ---- wide layout: the card becomes a row, header row appears ---- */
+@media(min-width:760px){
+  .bhead{
+    display:grid;grid-template-columns:80px 62px 1fr 1fr 1fr 1fr 74px;
+    gap:11px;padding:0 13px 7px;align-items:end}
+  .bhead span{font-size:10.5px;font-weight:700;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--text-faint)}
+  .band{background:transparent;border:0;border-bottom:1px solid var(--border);
+    border-radius:0;margin-bottom:0;
+    display:grid;grid-template-columns:80px 62px 1fr 1fr 1fr 1fr 74px;
+    gap:11px;padding:9px 13px;align-items:center}
+  .band-top{padding:0;display:contents}
+  .band-top .spacer{display:none}
+  .band-name{min-width:0}
+  .limit-row{padding:0;display:block}
+  .limit-row label{display:none}
+  .ref{display:none}
+  .adv{border:0;display:contents}
+  .adv summary{display:none}
+  .advgrid{padding:0;display:contents}
+  .advgrid .f{display:block}
+  .advgrid .f label{display:none}
+  .advgrid .f.wide{display:flex;justify-content:flex-start}
+  .inwrap input,.advgrid .inwrap input{
+    font-size:15px;min-height:44px;padding:10px 34px 10px 10px}
+  .unit{right:9px;font-size:11.5px}
+}
+
 /* ---------- diagnostics ---------- */
 .diagbox{margin-top:14px;border:1px solid #a371f740;background:var(--diag-bg);
   border-radius:var(--r-sm);padding:11px 13px}
@@ -216,8 +343,8 @@ main{padding:16px;max-width:1180px;margin:0 auto}
 </header>
 
 <nav role="tablist">
-  <button role="tab" aria-selected="true">Dashboard</button>
-  <button role="tab" aria-selected="false">Thresholds</button>
+  <button role="tab" aria-selected="true"  onclick="showTab(0,this)">Dashboard</button>
+  <button role="tab" aria-selected="false" onclick="showTab(1,this)">Thresholds</button>
   <button role="tab" aria-selected="false">Calibration</button>
   <button role="tab" aria-selected="false">Trends</button>
   <button role="tab" aria-selected="false">SMU status</button>
@@ -227,6 +354,16 @@ main{padding:16px;max-width:1180px;margin:0 auto}
 
 <main>
   <div class="grid" id="grid"></div>
+
+  <div id="thresholds" hidden>
+    <section class="card">
+      <div class="card-hd">
+        <h2>Thresholds</h2>
+        <div class="right"><span class="pill idle" id="th-sp">Spindle 1</span></div>
+      </div>
+      <div class="card-bd" id="th-body"></div>
+    </section>
+  </div>
 </main>
 
 <footer class="foot">
@@ -341,6 +478,145 @@ function card(s){
 }
 
 document.getElementById('grid').innerHTML = spindles.map(card).join('');
+
+/* ------------------------------------------------------------
+   Thresholds editor
+   ------------------------------------------------------------ */
+const QTY = [
+  {k:'current',  label:'Current',  unit:'A',   step:'0.1', live:12.84, dp:2},
+  {k:'pressure', label:'Pressure', unit:'bar', step:'0.5', live:41.2,  dp:1},
+  {k:'rpm',      label:'Speed',    unit:'rpm', step:'10',  live:8420,  dp:0}
+];
+const BANDS = ['LoLo','Lo','Hi','HiHi'];
+
+// [enabled, limit, hysteresis, onDelay, offDelay, latching]
+const cfg = {
+  current : [[false,0,0,0,0,false],[false,2,0.3,500,1000,false],
+             [true,18.5,0.5,500,1000,false],[true,22,0.5,200,1000,true]],
+  pressure: [[true,12,1,1000,2000,false],[true,25,1,1000,2000,false],
+             [true,68,1.5,1000,2000,false],[false,85,2,500,2000,true]],
+  rpm     : [[false,0,0,0,0,false],[true,6500,80,1500,2000,false],
+             [true,11000,100,1500,2000,false],[false,12500,120,800,2000,true]]
+};
+
+function bandCard(q, bi){
+  const b = cfg[q.k][bi];
+  const [on, limit, hyst, onD, offD, latch] = b;
+  const id = `${q.k}-${bi}`;
+  return `
+  <div class="band ${on?'':'off'}" data-band="${id}">
+    <div class="band-top">
+      <span class="band-name">${BANDS[bi]}</span>
+      <span class="spacer"></span>
+      <label class="sw" title="Enable ${BANDS[bi]}">
+        <input type="checkbox" ${on?'checked':''} onchange="toggleBand('${id}',this.checked)">
+        <span class="track2"></span><span class="knob"></span>
+      </label>
+    </div>
+
+    <div class="limit-row">
+      <label for="i-${id}">Limit</label>
+      <span class="inwrap">
+        <input id="i-${id}" type="number" inputmode="decimal" step="${q.step}"
+               value="${limit}" data-q="${q.k}" data-bi="${bi}" oninput="validate()">
+        <span class="unit">${q.unit}</span>
+      </span>
+      <span class="ref" id="r-${id}"></span>
+    </div>
+
+    <details class="adv">
+      <summary><span class="caret">▶</span>Advanced</summary>
+      <div class="advgrid">
+        <div class="f"><label for="h-${id}">Hysteresis</label>
+          <span class="inwrap"><input id="h-${id}" type="number" inputmode="decimal"
+            step="${q.step}" value="${hyst}"><span class="unit">${q.unit}</span></span></div>
+        <div class="f"><label for="d1-${id}">On delay</label>
+          <span class="inwrap"><input id="d1-${id}" type="number" inputmode="numeric"
+            step="50" value="${onD}"><span class="unit">ms</span></span></div>
+        <div class="f"><label for="d2-${id}">Off delay</label>
+          <span class="inwrap"><input id="d2-${id}" type="number" inputmode="numeric"
+            step="50" value="${offD}"><span class="unit">ms</span></span></div>
+        <div class="f wide">
+          <label class="sw"><input type="checkbox" ${latch?'checked':''}>
+            <span class="track2"></span><span class="knob"></span></label>
+          <label style="text-transform:none;font-size:13px;color:var(--text-dim)">Latching</label>
+        </div>
+      </div>
+    </details>
+  </div>`;
+}
+
+function renderThresholds(){
+  document.getElementById('th-body').innerHTML = QTY.map(q => `
+    <div class="qgroup">
+      <div class="qgroup-hd">
+        <h3>${q.label}</h3>
+        <span class="live">now <b class="num">${q.live.toLocaleString()} ${q.unit}</b></span>
+      </div>
+      <div class="bhead">
+        <span>Band</span><span>On</span><span>Limit</span>
+        <span>Hysteresis</span><span>On delay</span><span>Off delay</span><span>Latch</span>
+      </div>
+      ${BANDS.map((_,bi)=>bandCard(q,bi)).join('')}
+    </div>`).join('') + `
+    <div class="saverow">
+      <button class="btn" onclick="fakeSave()">Save thresholds</button>
+      <button class="btn sec">Revert</button>
+      <span class="errline" id="th-err"></span>
+    </div>`;
+  validate();
+}
+
+function toggleBand(id,on){
+  const el = document.querySelector(`[data-band="${id}"]`);
+  el.classList.toggle('off',!on);
+  validate();
+}
+
+/* Inline ordering validation. V1 only reported this on save, which is
+   exactly when a typo has already been committed. */
+function validate(){
+  let err = '';
+  QTY.forEach(q=>{
+    let prev = -Infinity, prevName = '';
+    BANDS.forEach((name,bi)=>{
+      const inp = document.getElementById(`i-${q.k}-${bi}`);
+      const ref = document.getElementById(`r-${q.k}-${bi}`);
+      const on  = !document.querySelector(`[data-band="${q.k}-${bi}"]`).classList.contains('off');
+      const v   = parseFloat(inp.value);
+      inp.classList.remove('bad'); ref.classList.remove('bad');
+      if(!on){ ref.textContent='Disabled — ignored'; return; }
+      if(isNaN(v)){ inp.classList.add('bad'); ref.textContent='Enter a number'; ref.classList.add('bad'); err='Some limits are not numbers'; return; }
+      if(v < prev){
+        inp.classList.add('bad'); ref.classList.add('bad');
+        ref.textContent = `Must be ≥ ${prevName} (${prev})`;
+        err = `${q.label}: ${name} is below ${prevName}`;
+      } else {
+        const pctOf = q.live/v*100;
+        ref.innerHTML = isFinite(pctOf)
+          ? `now <b>${q.live.toLocaleString()}</b> = <b>${pctOf.toFixed(0)}%</b> of this limit`
+          : '';
+      }
+      prev = v; prevName = name;
+    });
+  });
+  const e = document.getElementById('th-err');
+  if(e) e.textContent = err;
+}
+
+function fakeSave(){
+  const e = document.getElementById('th-err');
+  e.style.color = e.textContent ? '' : 'var(--ok)';
+  if(!e.textContent) e.textContent = 'Saved — pushed to SMU 1, commit acknowledged';
+}
+
+function showTab(i,btn){
+  document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-selected','false'));
+  btn.setAttribute('aria-selected','true');
+  document.getElementById('grid').hidden = i!==0;
+  document.getElementById('thresholds').hidden = i!==1;
+  if(i===1 && !document.getElementById('th-body').innerHTML) renderThresholds();
+}
 
 /* Live-ish jitter, to show that updating values do not shift the layout. */
 const base = spindles.map(s=>({c:s.current.v,p:s.pressure.v,r:s.rpm.v}));

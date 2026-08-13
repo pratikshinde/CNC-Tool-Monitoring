@@ -759,7 +759,7 @@ there is provisional until the shared generated header of §5.2 exists.
 
 ### 5.4 Web UI changes
 
-- **Thresholds**: restore the full four-band editor with hysteresis, delays, and per-band latching. V1's `VISIBLE_BANDS` restriction and fixed values are removed.
+- **Thresholds**: restore the full four-band editor with hysteresis, delays, and per-band latching. V1's `VISIBLE_BANDS` restriction and fixed values are removed. **The layout is redesigned — see §5.6, which is a field-reported defect, not a preference.**
 - **Calibration**: unchanged workflow (guided 2-point pressure, 1-point CT, auto-zero), now writing through to the SMU and awaiting its commit acknowledgement rather than completing locally.
 - **New — SMU status panel**: per-SMU link state (live/stale), firmware version, reset cause, last config sync. Without this, a stale link is invisible to the operator, and an operator who cannot tell a working system from a blind one does not have a reliable system.
 - **Pressure mode**: per-spindle 4–20 mA / 0–10 V selector, matching the hardware jumper (§3.2), with the mismatch diagnostic surfaced prominently if the sense pin is adopted.
@@ -882,6 +882,84 @@ proves unmanageable, the escape hatch is **Preact + htm** — about 5 KB gzipped
 combined, a component model with JSX-like syntax via tagged template literals,
 and **no build step**, inlined as a single file. Scope it to that screen rather
 than rewriting seven working tabs.
+
+### 5.6 Thresholds editor — redesigned after a field defect ✅
+
+**This is a bug report, not a styling preference.** During a test run on an
+Android phone, only about two digits of each threshold field were visible, and
+limits were entered wrongly as a result. On a machine monitor a mis-entered
+threshold is a wrong alarm limit, so this is safety-adjacent and gets fixed
+properly rather than nudged.
+
+#### Root cause ✅
+
+V1 renders the bands as a **seven-column HTML table** (`Band · On · Limit ·
+Hysteresis · On delay · Off delay · Latch`) with a number input in every cell.
+The `.tblwrap{overflow-x:auto}` wrapper looks like it protects against
+narrow screens, but `table{width:100%}` **defeats it** — the table compresses
+to fit rather than overflowing and scrolling. At 375 px:
+
+```
+  375 px viewport
+  − 32 px main padding − 28 px card padding − 24 px fieldset padding
+  = 291 px table width
+  − 84 px cell padding (7 cols x 12 px)
+  = 207 px of content, minus ~80 px for the label and two checkboxes
+  ≈ 32 px per numeric input, at 13 px font   ->   about two digits
+```
+
+Three compounding faults: the inputs were ~32 px wide, ~28 px tall (below the
+44 px touch minimum), and carried no `inputmode`, so Android was not obliged
+to present a numeric keypad.
+
+#### Fix ✅
+
+**1. Progressive disclosure.** `Limit` is the field that actually gets edited;
+hysteresis, the two delays, and latching are commissioning-time settings
+changed once. Giving all six equal weight is what created the cramped grid.
+Limit is now the primary control, with the rest behind a per-band
+**Advanced** disclosure that is collapsed by default. Six fields become one.
+
+**2. No table — one DOM, two layouts.** Each band is a card that reflows into
+a row above 760 px via `display:contents`, so the wide layout still reads as a
+table with a header row, while the narrow layout stacks. Because there is no
+`<table>`, nothing can compress below a usable width at any viewport.
+
+**3. Input ergonomics**, applied throughout: `inputmode="decimal"` (numeric
+where appropriate) for the right keyboard, 17 px type, 48 px height, unit
+rendered inside the field so what is being typed is never ambiguous, and
+spinners suppressed — they are useless with a thumb and steal width.
+
+**4. Inline validation.** Band ordering (`LoLo ≤ Lo ≤ Hi ≤ HiHi`) is checked
+as you type, marking the offending field and naming the constraint
+(*"Must be ≥ Lo (25)"*). V1 reported this only on save — which is precisely
+after a typo has already been committed.
+
+**5. Live reference.** Each enabled band shows the current reading as a
+percentage of that limit (*"now 12.84 A = 69% of this limit"*), so a limit an
+order of magnitude wrong is obvious while entering it rather than at the next
+cut.
+
+#### Measured, at 375 px ✅
+
+| | V1 | V2 |
+|---|---|---|
+| Limit input width | ~32 px | **282 px** |
+| Input height | ~28 px | **48 px** |
+| Font size | 13 px | **17 px** |
+| Numeric keyboard hint | none | `inputmode="decimal"` |
+| Fields visible per band | 6 | **1** (rest behind Advanced) |
+| Ordering errors surfaced | on save | **as typed** |
+
+Usable text width is 223 px against the 70 px needed for `88888.88` — three
+times the worst realistic value. Every interactive target (inputs, switches,
+disclosure rows) measures ≥ 44 px, and the wide layout keeps 198 px inputs.
+
+Prototype: `design/ui_prototype.html`, Thresholds tab.
+
+🟡 **Worth backporting to V1.** The defect exists in the shipped firmware on
+`main`, where the same table is used for the simplified Lo/Hi editor. The fix
+is self-contained in `index.html` and touches no C code.
 
 ---
 
