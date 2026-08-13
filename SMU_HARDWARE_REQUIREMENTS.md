@@ -24,6 +24,39 @@ UI, and the external PLC/SCADA-facing Modbus interface.
 verified against Nuvoton's own selection guide, not the product page summary.
 Fault detection is done digitally, in firmware, not via hardware comparator trip.
 
+**Alternative part, not yet chosen: Nuvoton M2003FC1AE.** Same TSSOP20
+footprint and price class, verified against the actual datasheet (not the
+product-page summary) the same way M031FB0AE was:
+
+| | M031FB0AE (chosen) | M2003FC1AE (alternative) |
+|---|---|---|
+| Core | Cortex-M0, 48 MHz | Cortex-M23 (no TrustZone), 24 MHz |
+| Flash / RAM | 16 KB / 2 KB | 32 KB / 4 KB |
+| Package | TSSOP20 | TSSOP20 (same footprint) |
+| I/O pins | 15 | **18** |
+| ADC | 7-ch, 12-bit, 2 MSPS | 8-ch, 12-bit, 500 kSPS |
+| RPM-input peripheral | general-purpose 32-bit timer | **3-channel enhanced input capture** — purpose-built for pulse period/frequency measurement |
+| I²C | 2 sets | 1 set (SMU only needs 1) |
+| UART | 3 sets | up to 2 + 1 via USCI, native RS-485 (9-bit + auto direction) |
+| ACMP / DAC | none (verified) | none (verified — no dedicated ACMP section anywhere in the datasheet, and the peripheral summary explicitly lists only ADC + PWM) |
+| Voltage range | 1.8–3.6 V | 2.4–5.5 V (both cover 3.3 V comfortably) |
+
+Every SMU requirement in this document (§3.1–§3.4) is met by either part —
+this is not a functional blocker either way. M2003FC1AE's two concrete
+advantages for this specific application, on the identical package size, are
+more I/O headroom (18 vs 15) and a hardware input-capture peripheral that is
+a more natural fit for RPM pulse timing than a general-purpose timer. It is
+also pin-compatible with Nuvoton's N76E003/MS51/MG51 8051-based lines, which
+it's explicitly positioned to replace — a signal it is priced competitively
+for a design already optimising for moderate cost. Neither part has a
+hardware comparator, so this choice does not affect the "digital detection
+only, no ACMP trip" decision already made above.
+
+**If M2003FC1AE is selected instead, every M031FB0AE reference in this
+document (§2 diagram, §3.1–§3.6, §5 BOM) should be read as M2003FC1AE** —
+the interface requirements themselves (I²C link, ADC channel count, RPM
+input, 4 PLC outputs) do not change; only the specific part number does.
+
 ---
 
 ## 2. System architecture
@@ -228,7 +261,8 @@ explicitly **not** a fault-signalling path any more — see §2.1.
 
 ## 5. Bill-of-materials additions (from the single-board design)
 
-- 2× Nuvoton M031FB0AE (TSSOP20)
+- 2× Nuvoton M031FB0AE (TSSOP20) — or 2× **M2003FC1AE** (same package/pin
+  count class, see §1 for the comparison); part selection is not yet final
 - 8× opto/relay output driver stages (4 per SMU) — was 4 total, now 8
 - I²C pull-up resistors ×2 pairs (one pair per bus)
 - Pressure burden resistor: **100 Ω** per channel (was 180 Ω — see §3.2, this
