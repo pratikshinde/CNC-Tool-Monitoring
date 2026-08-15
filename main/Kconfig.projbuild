@@ -1,0 +1,24 @@
+menu "CNC Tool Monitor V2"
+
+    config SMU_USE_MOCK
+        bool "Use software SMU mock instead of real I2C hardware"
+        default y
+        help
+            When enabled, telemetry.c drives its two SMU links through
+            smu_mock.c — a software stand-in that runs the real
+            spindle_sm.c/alarm.c logic against a synthesized cutting
+            cycle, including the two-phase config commit and fault
+            injection (link drop, CRC corruption, frozen sequence
+            numbers, sensor faults). No SMU hardware or I2C wiring is
+            needed.
+
+            When disabled, telemetry.c drives its links through
+            smu_i2c_transport.c against real SMU hardware on the two I2C
+            buses defined in board.h (SMU1_I2C_*/SMU2_I2C_*).
+
+            Defaults to y because, as of the V2 migration that added this
+            option, no SMU hardware exists yet to test against — see
+            FIRMWARE_DESIGN_SPEC.md and the "accepted risks" section of
+            the migration plan. Set to n once real SMUs are available.
+
+endmenu

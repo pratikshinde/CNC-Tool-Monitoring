@@ -1,0 +1,1537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CNC Tool Monitor</title>
+<style>
+/* ============================================================
+   Design system — shared with design/ui_prototype.html. See
+   FIRMWARE_DESIGN_SPEC.md §5.5/§5.6 for the reasoning: dark-first,
+   tabular numerals on every live value, 44px touch targets, colour
+   never the only signal, staleness rendered loudly.
+   ============================================================ */
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel-2:#1c232c; --border:#2c343d;
+  --border-strong:#3d4753; --text:#e8eef4; --text-dim:#9aa7b4; --text-faint:#6b7785;
+  --accent:#4da3ff;
+  --ok:#3fb950; --ok-bg:#3fb9501f;
+  --warn:#e3a008; --warn-bg:#e3a0081f;
+  --alarm:#f85149; --alarm-bg:#f851491f;
+  --diag:#a371f7; --diag-bg:#a371f71f;
+  --stale:#7d8590; --stale-bg:#7d859026;
+  --r:10px; --r-sm:6px;
+  --shadow:0 1px 2px #0006, 0 4px 12px #0003;
+}
+@media (prefers-color-scheme:light){
+  :root{
+    --bg:#f2f5f8; --panel:#fff; --panel-2:#f6f8fa; --border:#d6dde4;
+    --border-strong:#bcc6d0; --text:#111820; --text-dim:#5a6672; --text-faint:#8593a0;
+    --accent:#0a62c9;
+    --ok:#1a7f37; --ok-bg:#1a7f3714;
+    --warn:#9a6700; --warn-bg:#9a670014;
+    --alarm:#cf222e; --alarm-bg:#cf222e14;
+    --diag:#8250df; --diag-bg:#8250df14;
+    --stale:#6e7781; --stale-bg:#6e778118;
+    --shadow:0 1px 2px #0d111710, 0 4px 12px #0d111708;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,sans-serif;
+  font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+
+header{background:var(--panel);border-bottom:1px solid var(--border);
+  padding:11px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  position:sticky;top:0;z-index:10}
+header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:-.01em;white-space:nowrap}
+#healthpill{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+nav{display:flex;gap:2px;background:var(--panel);padding:0 12px;
+  border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none;
+  position:sticky;top:49px;z-index:9}
+nav::-webkit-scrollbar{display:none}
+nav button{background:none;border:none;border-bottom:2px solid transparent;
+  color:var(--text-dim);padding:11px 14px;min-height:44px;font-size:14px;font-weight:500;
+  cursor:pointer;white-space:nowrap;font-family:inherit}
+nav button:hover{color:var(--text)}
+nav button.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+main{padding:16px;max-width:1200px;margin:0 auto}
+.tab{display:none}
+.tab.active{display:block}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r);box-shadow:var(--shadow);padding:14px;overflow:hidden}
+.card h2{font-size:12px;margin:0 0 10px;color:var(--text-faint);
+  text-transform:uppercase;letter-spacing:.06em;font-weight:700}
+.card h3{font-size:14px;margin:14px 0 8px}
+.card h3:first-child{margin-top:0}
+
+.row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;
+  border-bottom:1px solid var(--border)}
+.row:last-child{border-bottom:none}
+.row .k{color:var(--text-dim)}
+.row .v{font-variant-numeric:tabular-nums;text-align:right}
+
+.big{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.unit{font-size:13px;color:var(--text-dim);font-weight:500}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:10px 0}
+.metric{background:var(--panel-2);border-radius:var(--r-sm);padding:10px}
+.metric .lbl{font-size:10.5px;color:var(--text-faint);text-transform:uppercase;
+  font-weight:700;letter-spacing:.05em}
+
+.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;
+  border-radius:999px;font-size:12.5px;font-weight:600;border:1px solid transparent;
+  white-space:nowrap}
+.badge{display:inline-block;padding:3px 10px;border-radius:11px;font-size:12px;font-weight:650}
+.badge.ok,.pill.ok{background:var(--ok-bg);color:var(--ok);border-color:#3fb95040}
+.badge.warn,.pill.warn{background:var(--warn-bg);color:var(--warn);border-color:#e3a00840}
+.badge.alarm,.pill.alarm{background:var(--alarm-bg);color:var(--alarm);border-color:#f8514940}
+.badge.diag,.pill.diag{background:var(--diag-bg);color:var(--diag);border-color:#a371f740}
+.badge.stale,.pill.stale{background:var(--stale-bg);color:var(--stale);border-color:#7d859040}
+.badge.muted,.pill.muted{background:var(--panel-2);color:var(--text-dim);border-color:var(--border)}
+
+label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:5px;font-weight:500}
+input,select{width:100%;padding:11px 12px;min-height:44px;background:var(--bg);
+  border:1px solid var(--border-strong);color:var(--text);border-radius:var(--r-sm);
+  font-size:15px;font-family:inherit;font-variant-numeric:tabular-nums}
+input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px #4da3ff33}
+input[type=checkbox]{width:20px;height:20px;min-height:0;accent-color:var(--accent)}
+.field{margin-bottom:12px}
+.cols2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}
+.cols3{display:grid;grid-template-columns:repeat(3,1fr);gap:0 10px}
+@media(max-width:480px){.cols3{grid-template-columns:1fr}}
+.checkline{display:flex;align-items:center;gap:10px;margin-bottom:10px;min-height:44px}
+.checkline label{margin:0;color:var(--text);font-size:14px}
+fieldset{border:1px solid var(--border);border-radius:var(--r-sm);margin:0 0 14px;padding:12px}
+legend{color:var(--text-faint);font-size:12px;padding:0 5px;font-weight:600}
+
+button.btn{background:var(--accent);color:#04121f;border:none;border-radius:var(--r-sm);
+  padding:11px 18px;min-height:44px;font-size:14.5px;font-weight:650;cursor:pointer;
+  font-family:inherit}
+button.btn:hover{filter:brightness(1.08)}
+button.btn:active{filter:brightness(.92)}
+button.btn.ghost{background:var(--panel-2);color:var(--text);border:1px solid var(--border-strong)}
+button.btn.danger{background:var(--alarm);color:#fff}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+
+canvas{width:100%;height:280px;display:block}
+.status{font-size:13px;min-height:18px;margin-top:8px}
+.status.ok{color:var(--ok)} .status.err{color:var(--alarm)}
+.hint{font-size:12.5px;color:var(--text-faint);margin:6px 0 0;line-height:1.5}
+progress{width:100%;height:8px}
+
+/* ---------- staleness (dashboard) ---------- */
+.card.is-stale .readings,.card.is-stale .bandwrap{opacity:.4;filter:saturate(.4)}
+.stale-banner{display:flex;align-items:center;gap:8px;background:var(--stale-bg);
+  border:1px solid #7d859040;border-radius:var(--r-sm);color:var(--stale);
+  font-size:12.5px;font-weight:650;padding:8px 12px;margin-bottom:12px}
+
+/* ---------- readings ---------- */
+.readings{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;
+  background:var(--border);border-radius:var(--r-sm);overflow:hidden;margin-bottom:12px}
+.rd{background:var(--panel);padding:12px 11px;min-width:0}
+.rd .lbl{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-faint);margin-bottom:5px;white-space:nowrap}
+.rd .val{font-size:24px;font-weight:650;line-height:1.05;letter-spacing:-.02em}
+@media(max-width:460px){
+  .readings{grid-template-columns:1fr}
+  .rd{display:grid;grid-template-columns:1fr auto;column-gap:14px;padding:11px 13px}
+  .rd .lbl{margin-bottom:0;align-self:center}
+  .rd .val{text-align:right}
+}
+
+/* ---------- band margin bars (dashboard) ---------- */
+.bandwrap{margin-top:4px}
+.brow{display:flex;align-items:center;gap:9px;margin-bottom:7px}
+.brow .name{font-size:12px;color:var(--text-dim);width:58px;flex:none}
+.track{position:relative;flex:1;height:7px;border-radius:4px;background:var(--panel-2);
+  border:1px solid var(--border);overflow:hidden}
+.fill{position:absolute;inset:0 auto 0 0;border-radius:4px;transition:width .3s}
+.fill.ok{background:linear-gradient(90deg,#3fb95099,var(--ok))}
+.fill.warn{background:linear-gradient(90deg,#e3a00899,var(--warn))}
+.fill.alarm{background:linear-gradient(90deg,#f8514999,var(--alarm))}
+.brow .pct{font-size:11.5px;color:var(--text-faint);width:38px;text-align:right;flex:none}
+
+/* ---------- io chips ---------- */
+.chips{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:var(--r-sm);
+  border:1px solid var(--border);background:var(--panel-2);font-size:12px;font-weight:550;
+  color:var(--text-dim)}
+.chip .dot{width:7px;height:7px;border-radius:50%;background:var(--text-faint);flex:none}
+.chip.on{color:var(--ok);border-color:#3fb95040;background:var(--ok-bg)}
+.chip.on .dot{background:var(--ok);box-shadow:0 0 0 3px #3fb9502e}
+
+/* ---------- thresholds: progressive-disclosure band editor ---------- */
+.qgroup{margin-bottom:16px}
+.qgroup-hd{display:flex;align-items:baseline;gap:9px;margin:0 0 9px;padding:0 2px}
+.qgroup-hd h3{font-size:14px;font-weight:650;margin:0;letter-spacing:-.01em}
+.qgroup-hd .live{font-size:12.5px;color:var(--text-faint)}
+.qgroup-hd .live b{color:var(--accent);font-weight:650}
+.bhead{display:none}
+.band{border:1px solid var(--border);border-radius:var(--r-sm);background:var(--panel-2);
+  margin-bottom:9px;overflow:hidden}
+.band.off{opacity:.55}
+.band-top{display:flex;align-items:center;gap:11px;padding:11px 13px}
+.band-name{font-size:14px;font-weight:650;min-width:52px}
+.band-top .spacer{margin-left:auto}
+.sw{position:relative;width:46px;min-height:44px;flex:none;cursor:pointer;
+  display:inline-flex;align-items:center}
+.sw input{position:absolute;inset:0;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.sw .track2{width:46px;height:27px;border-radius:999px;background:var(--border-strong);
+  transition:background .18s}
+.sw .knob{position:absolute;left:3px;top:50%;margin-top:-10.5px;width:21px;height:21px;
+  border-radius:50%;background:#fff;box-shadow:0 1px 3px #0006;transition:transform .18s}
+.sw input:checked + .track2{background:var(--ok)}
+.sw input:checked ~ .knob{transform:translateX(19px)}
+.limit-row{padding:0 13px 12px;display:grid;gap:5px}
+.limit-row label{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-faint);margin-bottom:0}
+.inwrap{position:relative;display:flex;align-items:center}
+.inwrap input{width:100%;font-size:16px;font-weight:600;padding:11px 46px 11px 13px;
+  -moz-appearance:textfield}
+.inwrap input::-webkit-outer-spin-button,.inwrap input::-webkit-inner-spin-button{
+  -webkit-appearance:none;margin:0}
+.inwrap input.bad{border-color:var(--alarm);box-shadow:0 0 0 3px #f8514933}
+.unit-badge{position:absolute;right:12px;font-size:13px;font-weight:600;
+  color:var(--text-faint);pointer-events:none}
+.ref{font-size:12px;color:var(--text-faint);min-height:17px}
+.ref.bad{color:var(--alarm)}
+.adv{border-top:1px solid var(--border)}
+.adv summary{list-style:none;cursor:pointer;padding:11px 13px;min-height:44px;
+  display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--text-dim)}
+.adv summary::-webkit-details-marker{display:none}
+.adv summary .caret{transition:transform .18s;font-size:10px}
+.adv[open] summary .caret{transform:rotate(90deg)}
+.advgrid{padding:0 13px 13px;display:grid;gap:11px;grid-template-columns:1fr 1fr}
+.advgrid .f{display:grid;gap:5px}
+.advgrid .f.wide{grid-column:1/-1;display:flex;align-items:center;gap:11px}
+.advgrid label{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--text-faint)}
+.advgrid .inwrap input{font-size:15px;padding:10px 40px 10px 11px}
+@media(min-width:760px){
+  .bhead{display:grid;grid-template-columns:80px 62px 1fr 1fr 1fr 1fr 74px;
+    gap:11px;padding:0 13px 7px;align-items:end}
+  .bhead span{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--text-faint)}
+  .band{background:transparent;border:0;border-bottom:1px solid var(--border);border-radius:0;
+    margin-bottom:0;display:grid;grid-template-columns:80px 62px 1fr 1fr 1fr 1fr 74px;
+    gap:11px;padding:9px 13px;align-items:center}
+  .band-top{padding:0;display:contents}
+  .band-top .spacer{display:none}
+  .limit-row{padding:0;display:block}
+  .limit-row label{display:none}
+  .ref{display:none}
+  .adv{border:0;display:contents}
+  .adv summary{display:none}
+  .advgrid{padding:0;display:contents}
+  .advgrid .f{display:block}
+  .advgrid .f label{display:none}
+  .inwrap input,.advgrid .inwrap input{font-size:15px;padding:10px 34px 10px 10px}
+  .unit-badge{right:9px;font-size:11.5px}
+}
+
+/* ---------- diagnostics box ---------- */
+.diagbox{margin-top:12px;border:1px solid #a371f740;background:var(--diag-bg);
+  border-radius:var(--r-sm);padding:11px 13px}
+.diagbox .t{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:650;
+  color:var(--diag);margin-bottom:4px}
+.diagbox p{margin:0;font-size:12.5px;color:var(--text-dim);line-height:1.5}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CNC Tool Monitor</h1>
+  <div id="healthpill"></div>
+</header>
+
+<nav>
+  <button class="active" data-tab="dashboard">Dashboard</button>
+  <button data-tab="trends">Trends</button>
+  <button data-tab="thresholds">Thresholds</button>
+  <button data-tab="calibration">Calibration</button>
+  <button data-tab="smu">SMU status</button>
+  <button data-tab="comms">Comms</button>
+  <button data-tab="system">System</button>
+</nav>
+
+<main>
+  <section id="tab-dashboard" class="tab active">
+    <div class="grid" id="dash-cards"></div>
+    <div class="card" style="margin-top:14px">
+      <h2>System</h2>
+      <div id="dash-system"></div>
+      <div class="btnrow">
+        <button class="btn" onclick="acknowledge()">Acknowledge alarms</button>
+        <span class="status" id="ack-status"></span>
+      </div>
+      <p class="hint">Acknowledging records that an alarm was seen. A latch
+        only releases once the condition itself has cleared.</p>
+    </div>
+  </section>
+
+  <section id="tab-trends" class="tab">
+    <div class="card">
+      <h2>Trends</h2>
+      <div class="cols3">
+        <div class="field">
+          <label for="tr-spindle">Spindle</label>
+          <select id="tr-spindle" onchange="loadHistory()"></select>
+        </div>
+        <div class="field">
+          <label for="tr-quantity">Quantity</label>
+          <select id="tr-quantity" onchange="drawChart()">
+            <option value="current_a">Current (A)</option>
+            <option value="pressure">Pressure</option>
+            <option value="rpm">Speed (RPM)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="tr-window">Window</label>
+          <select id="tr-window" onchange="drawChart()">
+            <option value="60">Last 1 min</option>
+            <option value="180">Last 3 min</option>
+            <option value="300" selected>Last 5 min</option>
+          </select>
+        </div>
+      </div>
+      <canvas id="chart"></canvas>
+      <p class="hint">Sampled once a second and held in RAM only &mdash; the
+        history resets on reboot. Long-term logging is not implemented; log
+        from Modbus (see the Comms tab) if you need durable history.</p>
+    </div>
+  </section>
+
+  <section id="tab-thresholds" class="tab">
+    <div class="card">
+      <div class="field" style="max-width:260px">
+        <label for="th-spindle">Spindle</label>
+        <select id="th-spindle" onchange="loadSpindle()"></select>
+      </div>
+      <div id="th-bands"></div>
+
+      <fieldset>
+        <legend>Cut detection</legend>
+        <p class="hint" style="margin-top:0">Thresholds are only evaluated
+          while the spindle is cutting. These decide when that is.</p>
+        <div class="cols3" style="margin-top:10px">
+          <div class="field">
+            <label for="sm-start">Start RPM</label>
+            <input id="sm-start" type="number" inputmode="decimal" step="1">
+          </div>
+          <div class="field">
+            <label for="sm-idle">Idle current (A)</label>
+            <input id="sm-idle" type="number" inputmode="decimal" step="0.1">
+          </div>
+          <div class="field">
+            <label for="sm-cut">Cut-detect current (A)</label>
+            <input id="sm-cut" type="number" inputmode="decimal" step="0.1">
+          </div>
+          <div class="field">
+            <label for="sm-settle">Settle (ms)</label>
+            <input id="sm-settle" type="number" inputmode="numeric" step="10">
+          </div>
+          <div class="field">
+            <label for="sm-inhibit">Alarm inhibit (ms)</label>
+            <input id="sm-inhibit" type="number" inputmode="numeric" step="10">
+          </div>
+        </div>
+        <p class="hint">Cut-detect must exceed idle by at least 20%, or the
+          state machine chatters between idle and cutting.</p>
+      </fieldset>
+
+      <div class="btnrow">
+        <button class="btn" onclick="saveThresholds()">Save thresholds</button>
+        <span class="status" id="th-status"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-calibration" class="tab">
+    <div class="field" style="max-width:260px">
+      <label for="cal-spindle">Spindle</label>
+      <select id="cal-spindle" onchange="loadSpindle();loadCalib()"></select>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Current (CT)</h2>
+        <div id="cal-cur-live"></div>
+
+        <h3>Zero</h3>
+        <p class="hint">With the spindle stopped, re-measure the CT's DC bias.
+          The SMU applies this locally; the ESP32's own copy is refreshed on
+          the next config save.</p>
+        <div class="btnrow">
+          <button class="btn ghost" onclick="autozero()">Auto-zero</button>
+          <span class="status" id="az-status"></span>
+        </div>
+
+        <h3>Span</h3>
+        <p class="hint">Run a known load, read it with a clamp meter, and enter
+          that value. Current passes through zero, so one point is enough.</p>
+        <div class="field" style="margin-top:8px">
+          <label for="cal-cur-ref">Reference reading (A)</label>
+          <input id="cal-cur-ref" type="number" inputmode="decimal" step="0.01">
+        </div>
+        <div class="btnrow">
+          <button class="btn" onclick="calibCapture('current',0)">Capture</button>
+          <button class="btn ghost" onclick="calibApply('current')">Apply</button>
+          <button class="btn ghost" onclick="calibReset('current')">Clear</button>
+        </div>
+        <div class="status" id="cal-cur-status"></div>
+
+        <h3>Values</h3>
+        <div class="cols2">
+          <div class="field">
+            <label for="cur-primary">CT primary (A)</label>
+            <input id="cur-primary" type="number" inputmode="decimal" step="1">
+          </div>
+          <div class="field">
+            <label for="cur-secondary">CT secondary (mA)</label>
+            <input id="cur-secondary" type="number" inputmode="decimal" step="1">
+          </div>
+          <div class="field">
+            <label for="cur-gain">Gain correction</label>
+            <input id="cur-gain" type="number" inputmode="decimal" step="0.001">
+          </div>
+          <div class="field">
+            <label for="cur-cutoff">No-load cutoff (A)</label>
+            <input id="cur-cutoff" type="number" inputmode="decimal" step="0.01">
+          </div>
+          <div class="field">
+            <label for="cur-burst">RMS burst samples</label>
+            <input id="cur-burst" type="number" inputmode="numeric" step="16">
+          </div>
+        </div>
+        <p class="hint">The cutoff reports exactly zero below its value. An RMS
+          of noise is never zero, so without it an idle spindle reads a small
+          phantom current.</p>
+      </div>
+
+      <div class="card">
+        <h2>Pressure</h2>
+        <div id="cal-pre-live"></div>
+
+        <h3>Two-point calibration</h3>
+        <p class="hint">Apply a pressure, read the reference instrument, enter
+          it, capture. Repeat at a different pressure, then apply. Two points
+          are needed: the 4&nbsp;mA live zero makes the error a slope
+          <em>and</em> an offset, and one point cannot solve both.</p>
+        <div class="cols2" style="margin-top:8px">
+          <div class="field">
+            <label for="cal-pre-ref0">Point 1 reference</label>
+            <input id="cal-pre-ref0" type="number" inputmode="decimal" step="0.1">
+          </div>
+          <div class="field">
+            <label for="cal-pre-ref1">Point 2 reference</label>
+            <input id="cal-pre-ref1" type="number" inputmode="decimal" step="0.1">
+          </div>
+        </div>
+        <div class="btnrow">
+          <button class="btn" onclick="calibCapture('pressure',0)">Capture 1</button>
+          <button class="btn" onclick="calibCapture('pressure',1)">Capture 2</button>
+          <button class="btn ghost" onclick="calibApply('pressure')">Apply</button>
+          <button class="btn ghost" onclick="calibReset('pressure')">Clear</button>
+        </div>
+        <div class="status" id="cal-pre-status"></div>
+        <div id="cal-pre-points" style="margin-top:8px"></div>
+
+        <h3>Values</h3>
+        <div class="cols2">
+          <div class="field">
+            <label for="pre-mode">Input mode</label>
+            <select id="pre-mode">
+              <option value="0">4&ndash;20 mA</option>
+              <option value="1">0&ndash;10 V</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="pre-unit">Unit</label>
+            <input id="pre-unit" maxlength="7">
+          </div>
+          <div class="field">
+            <label for="pre-min">Value at 4 mA / 0 V</label>
+            <input id="pre-min" type="number" inputmode="decimal" step="0.1">
+          </div>
+          <div class="field">
+            <label for="pre-max">Value at 20 mA / 10 V</label>
+            <input id="pre-max" type="number" inputmode="decimal" step="0.1">
+          </div>
+          <div class="field">
+            <label for="pre-gain">Gain correction</label>
+            <input id="pre-gain" type="number" inputmode="decimal" step="0.0001">
+          </div>
+          <div class="field">
+            <label for="pre-offset">Offset correction</label>
+            <input id="pre-offset" type="number" inputmode="decimal" step="0.01">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Speed (RPM)</h2>
+        <div class="field">
+          <label for="rpm-ppr">Pulses per revolution</label>
+          <input id="rpm-ppr" type="number" inputmode="numeric" step="1" min="1" max="1024">
+        </div>
+        <div class="field">
+          <label for="rpm-glitch">Glitch filter (ns)</label>
+          <input id="rpm-glitch" type="number" inputmode="numeric" step="1000">
+        </div>
+        <div class="field">
+          <label for="rpm-timeout">Zero timeout (ms)</label>
+          <input id="rpm-timeout" type="number" inputmode="numeric" step="100">
+        </div>
+        <p class="hint">The hardware filter caps at about 12&nbsp;&micro;s.
+          Larger values are clamped, and anything near a millisecond would cap
+          measurable speed far below the spindle's range.</p>
+      </div>
+
+      <div class="card">
+        <h2>Spindle</h2>
+        <div class="field">
+          <label for="sp-name">Name</label>
+          <input id="sp-name" maxlength="23">
+        </div>
+        <div class="checkline">
+          <input type="checkbox" id="sp-enabled">
+          <label for="sp-enabled">Spindle enabled</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="btnrow">
+      <button class="btn" onclick="saveCalibration()">Save calibration</button>
+      <span class="status" id="cal-status"></span>
+    </div>
+  </section>
+
+  <section id="tab-smu" class="tab">
+    <div class="grid" id="smu-cards"></div>
+    <p class="hint" style="margin-top:12px">Each SMU owns its own acquisition,
+      alarm evaluation and PLC outputs — this device stays correct even while
+      a link below reads stale or down. Age, CRC and timeout counts are since
+      the ESP32 last booted, not lifetime figures.</p>
+  </section>
+
+  <section id="tab-comms" class="tab">
+    <div class="grid">
+      <div class="card">
+        <h2>Connectivity</h2>
+        <div id="net-rows"></div>
+      </div>
+
+      <div class="card">
+        <h2>WiFi</h2>
+        <div class="field">
+          <label for="wifi-ssid">Station SSID</label>
+          <input id="wifi-ssid" maxlength="31" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="wifi-pass">Station password</label>
+          <input id="wifi-pass" type="password" maxlength="63"
+                 autocomplete="new-password" placeholder="leave blank to keep current">
+        </div>
+        <p class="hint">The fallback access point stays up regardless, so a
+          wrong password here can never lock you out of this page.</p>
+      </div>
+
+      <div class="card">
+        <h2>Modbus</h2>
+        <fieldset>
+          <legend>RTU (RS485)</legend>
+          <div class="checkline">
+            <input type="checkbox" id="mb-rtu-enabled">
+            <label for="mb-rtu-enabled">Enabled</label>
+          </div>
+          <div class="cols2">
+            <div class="field">
+              <label for="mb-baud">Baud rate</label>
+              <select id="mb-baud">
+                <option>1200</option><option>2400</option><option>4800</option>
+                <option>9600</option><option>19200</option><option>38400</option>
+                <option>57600</option><option>115200</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="mb-parity">Parity</label>
+              <select id="mb-parity">
+                <option value="0">None</option>
+                <option value="1">Odd</option>
+                <option value="2">Even</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="mb-stop">Stop bits</label>
+              <select id="mb-stop"><option>1</option><option>2</option></select>
+            </div>
+            <div class="field">
+              <label for="mb-data">Data bits</label>
+              <select id="mb-data"><option>8</option><option>7</option></select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="mb-slave">Slave ID (1&ndash;247)</label>
+            <input id="mb-slave" type="number" inputmode="numeric" min="1" max="247">
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>TCP</legend>
+          <div class="checkline">
+            <input type="checkbox" id="mb-tcp-enabled">
+            <label for="mb-tcp-enabled">Enabled</label>
+          </div>
+          <div class="field">
+            <label for="mb-port">Port</label>
+            <input id="mb-port" type="number" inputmode="numeric" min="1" max="65535">
+          </div>
+        </fieldset>
+        <p class="hint">Both RTU and TCP are always available at once — see
+          MODBUS_REGISTER_MAP.md for the full register layout, including the
+          per-SMU link-health block this UI's SMU status tab also shows.</p>
+      </div>
+    </div>
+
+    <div class="btnrow">
+      <button class="btn" onclick="saveComms()">Save comms settings</button>
+      <span class="status" id="comms-status"></span>
+    </div>
+  </section>
+
+  <section id="tab-system" class="tab">
+    <div class="grid">
+      <div class="card">
+        <h2>Firmware</h2>
+        <div id="sys-rows"></div>
+      </div>
+
+      <div class="card">
+        <h2>Firmware update</h2>
+        <p class="hint" style="margin-top:0">Upload a <code>.bin</code> built
+          for this project. It is written to the spare slot; the running
+          firmware is untouched until it verifies and reboots. If the new
+          build fails to run, the bootloader reverts automatically.</p>
+        <div class="field" style="margin-top:10px">
+          <input id="ota-file" type="file" accept=".bin">
+        </div>
+        <progress id="ota-progress" value="0" max="100" style="display:none"></progress>
+        <div class="btnrow">
+          <button class="btn" onclick="uploadFirmware()">Upload and reboot</button>
+          <span class="status" id="ota-status"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Maintenance</h2>
+        <div class="btnrow">
+          <button class="btn ghost" onclick="reboot()">Reboot</button>
+          <button class="btn danger" onclick="factoryReset()">Factory reset</button>
+        </div>
+        <div class="status" id="maint-status"></div>
+        <p class="hint">Factory reset restores every setting, including
+          calibration and comms, then restarts. It does not touch either
+          SMU's own local calibration copy.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+'use strict';
+
+const SEV_CLASS = {
+  'none':'ok', 'diagnostic':'diag', 'wear trend':'warn', 'warning':'warn',
+  'alarm':'alarm', 'tool breakage':'alarm', 'crash':'alarm'
+};
+const NSPINDLE = 2;
+const BAND_LABEL = ['LoLo','Lo','Hi','HiHi'];
+const QTY = ['current','pressure','rpm'];
+const QTY_LABEL = {current:'Current', pressure:'Pressure', rpm:'Speed'};
+const QTY_UNIT  = {current:'A', pressure:'', rpm:'rpm'};
+const QTY_STEP  = {current:'0.1', pressure:'0.5', rpm:'10'};
+
+let telemetry = null;
+let history = null;
+let spindleCfg = null;
+
+/* Per-spindle band config, cached independently of spindleCfg (which only
+   ever holds the single spindle currently selected in the Thresholds/
+   Calibration tabs) so the Dashboard can draw margin-to-limit bars for
+   every spindle regardless of which tab is active. Refreshed at startup
+   and after a threshold save; a stale cache entry just means a bar lags
+   an edit made this second, never a wrong reading. */
+let spindleCfgCache = new Array(NSPINDLE).fill(null);
+
+async function refreshSpindleCfgCache() {
+  for (let i = 0; i < NSPINDLE; i++) {
+    try { spindleCfgCache[i] = await getJSON('/api/spindle?spindle=' + i); }
+    catch (e) { /* keep whatever was cached before */ }
+  }
+}
+
+/* ---------- small helpers ---------- */
+
+const $ = id => document.getElementById(id);
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function row(k, v, badgeClass) {
+  const r = el('div','row');
+  r.appendChild(el('div','k',k));
+  const cell = el('div','v');
+  if (badgeClass) cell.appendChild(el('span','badge '+badgeClass, v));
+  else cell.textContent = v;
+  r.appendChild(cell);
+  return r;
+}
+
+function setStatus(id, msg, cls) {
+  const e = $(id);
+  e.className = 'status' + (cls ? ' '+cls : '');
+  e.textContent = msg;
+}
+
+function num(id) { return Number($(id).value); }
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body || {})
+  });
+  const j = await r.json().catch(() => ({status:'error', reason:'bad response'}));
+  if (j.status !== 'ok') throw new Error(j.reason || 'rejected');
+  return j;
+}
+
+/* ---------- tabs ---------- */
+
+document.querySelectorAll('nav button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    $('tab-' + b.dataset.tab).classList.add('active');
+    if (b.dataset.tab === 'trends') loadHistory();
+    if (b.dataset.tab === 'system') loadSystem();
+    if (b.dataset.tab === 'calibration') loadCalib();
+    if (b.dataset.tab === 'smu') loadSmuStatus();
+  });
+});
+
+function fillSpindleSelects() {
+  ['tr-spindle','th-spindle','cal-spindle'].forEach(id => {
+    const s = $(id);
+    if (s.options.length) return;
+    for (let i = 0; i < NSPINDLE; i++) {
+      const name = telemetry ? telemetry.spindles[i].name : ('Spindle ' + (i+1));
+      s.appendChild(new Option(name, i));
+    }
+  });
+}
+
+/* ---------- dashboard ---------- */
+
+/* `under` distinguishes a lower-bound band (LoLo/Lo — alarms as the value
+   FALLS toward it) from an upper-bound one (Hi/HiHi — alarms as the value
+   RISES toward it). Getting this backwards is not cosmetic: for a Lo RPM
+   floor (stall/no-load detection), a spindle running comfortably above it
+   has a HIGH ratio of value/limit but is nowhere near alarming — showing
+   that ratio as a red, near-100% bar would tell an operator the opposite
+   of the truth. So the percentage always means "how close to tripping",
+   regardless of which side the band watches. */
+function pctOfLimit(value, limit, under) {
+  if (!isFinite(limit) || limit === 0) return null;
+  const ratio = under ? (limit / Math.max(value, 1e-9)) : (value / limit);
+  return Math.max(0, Math.min(150, ratio * 100));
+}
+
+function bandFillClass(pct) {
+  if (pct === null) return 'ok';
+  if (pct >= 100) return 'alarm';
+  if (pct >= 70) return 'warn';
+  return 'ok';
+}
+
+/* Which band a quantity's margin bar tracks, in preference order (first
+   enabled band wins). Current/pressure alarms are almost always an
+   over-limit condition, so Hi/HiHi lead; RPM's operationally interesting
+   limit is usually the low one (stall/no-load), so Lo/LoLo lead — same
+   asymmetry the abandoned first draft of this feature was reaching for.
+   bi < 2 (LoLo/Lo) is a lower-bound band; see pctOfLimit's `under`. */
+const MARGIN_BAND_PREF = { current: [2,3,1,0], pressure: [2,3,1,0], rpm: [1,0,2,3] };
+
+function marginBand(q, cfg) {
+  if (!cfg) return null;
+  for (const bi of MARGIN_BAND_PREF[q]) {
+    const b = cfg.bands[q][bi];
+    if (b && b.enabled) return { b, under: bi < 2 };
+  }
+  return null;
+}
+
+async function pollTelemetry() {
+  try {
+    telemetry = await getJSON('/api/telemetry');
+  } catch (e) { return; }
+
+  fillSpindleSelects();
+
+  const pill = $('healthpill');
+  pill.innerHTML = '';
+  pill.appendChild(el('span','pill ' + (telemetry.system_healthy ? 'ok':'alarm'),
+    telemetry.system_healthy ? 'Healthy' : 'FAULT'));
+  if (telemetry.diagnostic_fault)
+    pill.appendChild(el('span','pill diag','Diagnostic'));
+  if (!telemetry.adc_healthy)
+    pill.appendChild(el('span','pill stale','Link stale'));
+
+  const cards = $('dash-cards');
+  cards.innerHTML = '';
+  telemetry.spindles.forEach((sp, idx) => {
+    const stale = sp.link && sp.link.state !== 'live';
+    const c = el('div','card' + (stale ? ' is-stale' : ''));
+
+    const head = el('div','row');
+    head.style.border = 'none'; head.style.paddingBottom = '10px';
+    head.appendChild(el('div', null, sp.name + (sp.enabled ? '' : ' (disabled)')));
+    const hv = el('div','v');
+    if (stale) {
+      hv.appendChild(el('span','badge stale', sp.link.state === 'down' ? 'link down' : 'degraded'));
+    } else {
+      hv.appendChild(el('span','badge ' + (SEV_CLASS[sp.severity]||'muted'),
+        sp.severity === 'none' ? sp.state : sp.severity));
+    }
+    head.appendChild(hv);
+    c.appendChild(head);
+
+    if (stale) {
+      const age = sp.link.age_ms != null ? Math.round(sp.link.age_ms/1000) + 's ago' : 'never linked';
+      const banner = el('div','stale-banner');
+      banner.textContent = 'Showing last known good data (' + age + ') — the SMU itself keeps monitoring and driving outputs regardless';
+      c.appendChild(banner);
+    }
+
+    const m = el('div','readings');
+    m.appendChild(metric('Current', sp.current_a.toFixed(2), 'A'));
+    m.appendChild(metric('Pressure', sp.pressure.toFixed(1), sp.pressure_unit));
+    m.appendChild(metric('Speed', Math.round(sp.rpm).toLocaleString(), 'rpm'));
+    c.appendChild(m);
+
+    /* Margin-to-limit bars, from spindleCfgCache rather than spindleCfg
+       (which only tracks whichever spindle is selected in the Thresholds
+       tab) — cheap and genuinely useful: an operator sees how close a cut
+       is running to its limit, not just whether it has already crossed
+       it. Silently omitted if the cache has not loaded yet or no relevant
+       band is enabled. */
+    const mcfg = spindleCfgCache[idx];
+    const bandRows = QTY
+      .map(q => ({ q, m: marginBand(q, mcfg) }))
+      .filter(({m}) => m);
+    if (bandRows.length) {
+      const bw = el('div','bandwrap');
+      bandRows.forEach(({q, m}) => {
+        const value = q === 'current' ? sp.current_a : (q === 'pressure' ? sp.pressure : sp.rpm);
+        const pct = pctOfLimit(value, m.b.limit, m.under);
+        const brow = el('div','brow');
+        brow.appendChild(el('span','name', QTY_LABEL[q]));
+        const track = el('span','track');
+        const fill = el('span','fill ' + bandFillClass(pct));
+        fill.style.width = (pct === null ? 0 : pct) + '%';
+        track.appendChild(fill);
+        brow.appendChild(track);
+        brow.appendChild(el('span','pct num', pct === null ? '—' : Math.round(pct) + '%'));
+        bw.appendChild(brow);
+      });
+      c.appendChild(bw);
+    }
+
+    c.appendChild(row('State', sp.state));
+    c.appendChild(row('Monitoring', sp.monitoring_armed ? 'armed' : 'not armed',
+      sp.monitoring_armed ? 'ok' : 'muted'));
+    c.appendChild(row('Current avg / peak',
+      sp.current_avg_a.toFixed(2) + ' / ' + sp.current_peak_a.toFixed(2) + ' A'));
+
+    if (sp.current_status !== 'ok')
+      c.appendChild(row('Current sensor', sp.current_status, 'diag'));
+    if (sp.pressure_status !== 'ok')
+      c.appendChild(row('Pressure sensor', sp.pressure_status, 'diag'));
+    if (sp.rpm_sensor_suspect)
+      c.appendChild(row('Speed sensor', 'no pulses under load', 'diag'));
+    if (sp.any_latched)
+      c.appendChild(row('Latched', 'awaiting acknowledgement', 'warn'));
+
+    c.appendChild(row('Cycles', sp.cycle_count));
+    if (sp.cycle_count > 0)
+      c.appendChild(row('Last cycle',
+        (sp.last_cycle_ms/1000).toFixed(1) + ' s, mean ' +
+        sp.last_cycle_mean_a.toFixed(2) + ' A'));
+
+    const chips = el('div','chips');
+    const outputChip = (label, on) => {
+      const ch = el('span','chip' + (on?' on':''));
+      ch.appendChild(el('span','dot'));
+      ch.appendChild(document.createTextNode(label));
+      return ch;
+    };
+    chips.appendChild(outputChip('Current fault', !!(sp.output_state & 1)));
+    chips.appendChild(outputChip('Pressure fault', !!(sp.output_state & 2)));
+    chips.appendChild(outputChip('RPM fault', !!(sp.output_state & 4)));
+    chips.appendChild(outputChip('SMU healthy', !!(sp.output_state & 8)));
+    c.appendChild(chips);
+
+    cards.appendChild(c);
+  });
+
+  const sys = $('dash-system');
+  sys.innerHTML = '';
+  sys.appendChild(row('Loop period', telemetry.loop_period_ms + ' ms (worst ' +
+    telemetry.worst_loop_ms + ')'));
+  sys.appendChild(row('Uptime', fmtUptime(telemetry.uptime_s)));
+  sys.appendChild(row('SMU links', telemetry.adc_healthy ? 'both fresh' : 'one or both stale',
+    telemetry.adc_healthy ? 'ok' : 'stale'));
+
+  if ($('tab-trends').classList.contains('active')) appendLive();
+}
+
+function metric(label, value, unit) {
+  const d = el('div','rd');
+  d.appendChild(el('div','lbl',label));
+  const v = el('div','val num', value);
+  v.appendChild(el('span','unit',' ' + unit));
+  d.appendChild(v);
+  return d;
+}
+
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600);
+  const m = Math.floor(s%3600/60);
+  if (d) return d + 'd ' + h + 'h';
+  if (h) return h + 'h ' + m + 'm';
+  return m + 'm ' + (s%60) + 's';
+}
+
+async function acknowledge() {
+  try {
+    await postJSON('/api/acknowledge');
+    setStatus('ack-status','Acknowledged.','ok');
+  } catch (e) { setStatus('ack-status', e.message, 'err'); }
+}
+
+/* ---------- SMU status ---------- */
+
+function linkStatePill(state) {
+  const cls = state === 'live' ? 'ok' : (state === 'degraded' ? 'warn' : 'alarm');
+  return el('span','pill ' + cls, state);
+}
+
+async function loadSmuStatus() {
+  let data;
+  try { data = await getJSON('/api/smu'); } catch (e) { return; }
+
+  const host = $('smu-cards');
+  host.innerHTML = '';
+  data.smus.forEach(m => {
+    const c = el('div','card');
+    const head = el('div','row');
+    head.style.border = 'none'; head.style.paddingBottom = '10px';
+    head.appendChild(el('div', null, m.name));
+    const hv = el('div','v');
+    hv.appendChild(linkStatePill(m.link_state));
+    head.appendChild(hv);
+    c.appendChild(head);
+
+    c.appendChild(row('Ever linked', m.have_ever_linked ? 'yes' : 'no',
+      m.have_ever_linked ? 'ok' : 'muted'));
+    c.appendChild(row('Last good frame',
+      m.have_ever_linked ? (fmtUptime(Math.round(m.age_ms/1000)) + ' ago') : '—'));
+    c.appendChild(row('CRC errors (since boot)', m.crc_error_count));
+    c.appendChild(row('Timeouts (since boot)', m.timeout_count));
+    c.appendChild(row('Polls (since boot)', m.poll_count));
+
+    if (m.have_ever_linked) {
+      c.appendChild(row('SMU firmware', m.fw_version));
+      c.appendChild(row('SMU reset cause', m.reset_cause,
+        m.reset_cause === 'power-on' ? 'muted' : 'warn'));
+      c.appendChild(row('SMU reset count', m.reset_count,
+        m.reset_count > 0 && m.reset_cause !== 'power-on' ? 'warn' : 'muted'));
+      c.appendChild(row('SMU uptime', fmtUptime(m.smu_uptime_s)));
+      c.appendChild(row('Config sync', m.config_synced ? 'up to date' : 'push pending',
+        m.config_synced ? 'ok' : 'warn'));
+    } else {
+      const diag = el('div','diagbox');
+      const t = el('div','t'); t.textContent = 'No identity read yet';
+      diag.appendChild(t);
+      diag.appendChild(el('p', null,
+        'This SMU has never produced a single valid frame since the ESP32 booted. ' +
+        'Check the I2C wiring for this spindle if this persists.'));
+      c.appendChild(diag);
+    }
+
+    host.appendChild(c);
+  });
+}
+
+/* ---------- trends ---------- */
+
+async function loadHistory() {
+  try {
+    history = await getJSON('/api/history?spindle=' + $('tr-spindle').value);
+    drawChart();
+  } catch (e) { /* graph simply stays as-is */ }
+}
+
+/* Append the newest live reading so the chart keeps moving between the
+   coarser history reloads. */
+function appendLive() {
+  if (!history || !telemetry) return;
+  const i = Number($('tr-spindle').value);
+  const sp = telemetry.spindles[i];
+  history.current_a.push(sp.current_a);
+  history.pressure.push(sp.pressure);
+  history.rpm.push(sp.rpm);
+  const cap = 300;
+  ['current_a','pressure','rpm'].forEach(k => {
+    while (history[k].length > cap) history[k].shift();
+  });
+  drawChart();
+}
+
+function drawChart() {
+  const cv = $('chart');
+  if (!cv || !history) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext('2d');
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,w,h);
+
+  const css = getComputedStyle(document.documentElement);
+  const cBorder = css.getPropertyValue('--border').trim();
+  const cMuted  = css.getPropertyValue('--text-faint').trim();
+  const cAccent = css.getPropertyValue('--accent').trim();
+
+  const key = $('tr-quantity').value;
+  const windowS = Number($('tr-window').value);
+  let data = history[key] || [];
+  if (data.length > windowS) data = data.slice(data.length - windowS);
+
+  const padL = 52, padR = 10, padT = 12, padB = 24;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+
+  if (data.length < 2) {
+    g.fillStyle = cMuted; g.font = '13px sans-serif'; g.textAlign = 'center';
+    g.fillText('Collecting data…', w/2, h/2);
+    return;
+  }
+
+  let lo = Math.min(...data), hi = Math.max(...data);
+  if (hi - lo < 1e-6) { hi = lo + 1; lo -= 1; }
+  const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
+  if (lo > 0 && key !== 'rpm') lo = 0;   /* current/pressure read against zero */
+
+  const x = i => padL + (i / (data.length - 1)) * plotW;
+  const y = v => padT + plotH - ((v - lo) / (hi - lo)) * plotH;
+
+  /* gridlines + y labels */
+  g.strokeStyle = cBorder; g.fillStyle = cMuted;
+  g.lineWidth = 1; g.font = '11px sans-serif'; g.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, yy = Math.round(y(v)) + 0.5;
+    g.beginPath(); g.moveTo(padL, yy); g.lineTo(w - padR, yy); g.stroke();
+    g.fillText(v.toFixed(Math.abs(hi) < 10 ? 2 : 0), padL - 6, yy + 3);
+  }
+
+  /* x labels: seconds ago */
+  g.textAlign = 'center';
+  for (let i = 0; i <= 4; i++) {
+    const idx = Math.round((data.length - 1) * i / 4);
+    const ago = data.length - 1 - idx;
+    g.fillText(ago === 0 ? 'now' : '-' + ago + 's', x(idx), h - 8);
+  }
+
+  /* series */
+  g.strokeStyle = cAccent; g.lineWidth = 2; g.beginPath();
+  data.forEach((v,i) => i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v)));
+  g.stroke();
+
+  /* soft fill under the line */
+  g.lineTo(x(data.length-1), padT + plotH);
+  g.lineTo(x(0), padT + plotH);
+  g.closePath();
+  g.globalAlpha = 0.12; g.fillStyle = cAccent; g.fill(); g.globalAlpha = 1;
+}
+
+window.addEventListener('resize', drawChart);
+
+/* ---------- spindle config (thresholds + calibration) ---------- */
+
+function activeSpindle() {
+  const t = document.querySelector('nav button.active').dataset.tab;
+  return t === 'calibration' ? $('cal-spindle').value : $('th-spindle').value;
+}
+
+async function loadSpindle() {
+  const i = activeSpindle();
+  try {
+    spindleCfg = await getJSON('/api/spindle?spindle=' + i);
+  } catch (e) { return; }
+
+  /* keep the two selectors in step so switching tabs is not confusing */
+  $('th-spindle').value = i; $('cal-spindle').value = i;
+
+  renderBands();
+
+  const sm = spindleCfg.sm;
+  $('sm-start').value   = sm.start_rpm;
+  $('sm-idle').value    = sm.idle_current_a;
+  $('sm-cut').value     = sm.cut_detect_current_a;
+  $('sm-settle').value  = sm.settle_ms;
+  $('sm-inhibit').value = sm.alarm_inhibit_ms;
+
+  const c = spindleCfg.current;
+  $('cur-primary').value   = c.ct_primary_amps;
+  $('cur-secondary').value = c.ct_secondary_ma;
+  $('cur-gain').value      = c.gain_correction;
+  $('cur-cutoff').value    = c.noload_cutoff_a;
+  $('cur-burst').value     = c.rms_burst_samples;
+
+  const p = spindleCfg.pressure;
+  $('pre-mode').value   = p.mode;
+  $('pre-unit').value   = p.unit;
+  $('pre-min').value    = p.sensor_min;
+  $('pre-max').value    = p.sensor_max;
+  $('pre-gain').value   = p.gain_correction;
+  $('pre-offset').value = p.offset_correction;
+
+  const r = spindleCfg.rpm;
+  $('rpm-ppr').value     = r.pulses_per_rev;
+  $('rpm-glitch').value  = r.glitch_filter_ns;
+  $('rpm-timeout').value = r.zero_timeout_ms;
+
+  $('sp-name').value      = spindleCfg.name;
+  $('sp-enabled').checked = spindleCfg.enabled;
+}
+
+/* Progressive-disclosure band editor — see FIRMWARE_DESIGN_SPEC.md §5.6.
+   Replaces the earlier 7-column <table>, which compressed each limit
+   input to ~32px at 375px wide (two visible digits) and was directly
+   responsible for mis-entered thresholds during a real test run. Limit
+   is the field that actually gets edited day to day; hysteresis, the two
+   delays and latching are commissioning-time settings and sit behind a
+   collapsed "Advanced" disclosure per band. Same DOM reflows into a
+   table-like row above 760px via CSS grid + display:contents. */
+function liveValueFor(q) {
+  if (!telemetry) return null;
+  const sp = telemetry.spindles[Number($('th-spindle').value)];
+  if (!sp) return null;
+  return q === 'current' ? sp.current_a : (q === 'pressure' ? sp.pressure : sp.rpm);
+}
+
+function bandCard(q, bi) {
+  const b = spindleCfg.bands[q][bi];
+  const id = `${q}-${bi}`;
+  const unit = q === 'pressure' ? (spindleCfg.pressure.unit || '') : QTY_UNIT[q];
+  return `
+  <div class="band ${b.enabled?'':'off'}" data-band="${id}">
+    <div class="band-top">
+      <span class="band-name">${BAND_LABEL[bi]}</span>
+      <span class="spacer"></span>
+      <label class="sw" title="Enable ${BAND_LABEL[bi]}">
+        <input type="checkbox" id="b-${id}-enabled" ${b.enabled?'checked':''} onchange="toggleBand('${id}',this.checked)">
+        <span class="track2"></span><span class="knob"></span>
+      </label>
+    </div>
+    <div class="limit-row">
+      <label for="b-${id}-limit">Limit</label>
+      <span class="inwrap">
+        <input id="b-${id}-limit" type="number" inputmode="decimal" step="${QTY_STEP[q]}"
+               value="${b.limit}" data-q="${q}" data-bi="${bi}" oninput="validateBands()">
+        <span class="unit-badge">${unit}</span>
+      </span>
+      <span class="ref" id="r-${id}"></span>
+    </div>
+    <details class="adv">
+      <summary><span class="caret">&#9656;</span>Advanced</summary>
+      <div class="advgrid">
+        <div class="f"><label for="h-${id}">Hysteresis</label>
+          <span class="inwrap"><input id="h-${id}" type="number" inputmode="decimal"
+            step="${QTY_STEP[q]}" value="${b.hysteresis}"><span class="unit-badge">${unit}</span></span></div>
+        <div class="f"><label for="d1-${id}">On delay</label>
+          <span class="inwrap"><input id="d1-${id}" type="number" inputmode="numeric"
+            step="50" value="${b.on_delay_ms}"><span class="unit-badge">ms</span></span></div>
+        <div class="f"><label for="d2-${id}">Off delay</label>
+          <span class="inwrap"><input id="d2-${id}" type="number" inputmode="numeric"
+            step="50" value="${b.off_delay_ms}"><span class="unit-badge">ms</span></span></div>
+        <div class="f wide">
+          <label class="sw"><input type="checkbox" id="l-${id}" ${b.latching?'checked':''}>
+            <span class="track2"></span><span class="knob"></span></label>
+          <label style="text-transform:none;font-size:13px;color:var(--text-dim);margin:0">Latching</label>
+        </div>
+      </div>
+    </details>
+  </div>`;
+}
+
+function renderBands() {
+  const host = $('th-bands');
+  host.innerHTML = QTY.map(q => {
+    const live = liveValueFor(q);
+    const liveStr = live === null ? '' :
+      `<span class="live">now <b class="num">${q==='rpm'?Math.round(live).toLocaleString():live.toFixed(q==='pressure'?1:2)} ${q==='pressure'?(spindleCfg.pressure.unit||''):QTY_UNIT[q]}</b></span>`;
+    return `
+    <div class="qgroup">
+      <div class="qgroup-hd">
+        <h3>${QTY_LABEL[q]}</h3>
+        ${liveStr}
+      </div>
+      <div class="bhead">
+        <span>Band</span><span>On</span><span>Limit</span>
+        <span>Hysteresis</span><span>On delay</span><span>Off delay</span><span>Latch</span>
+      </div>
+      ${[0,1,2,3].map(bi => bandCard(q, bi)).join('')}
+    </div>`;
+  }).join('') + `<p class="hint" id="th-order-hint">Enabled limits must stay in order: LoLo &le; Lo &le; Hi &le; HiHi. Disabled bands are ignored, so a stale value on one will not block a save.</p>`;
+  validateBands();
+}
+
+function toggleBand(id, on) {
+  const el = document.querySelector(`[data-band="${id}"]`);
+  el.classList.toggle('off', !on);
+  validateBands();
+}
+
+/* Inline ordering validation, checked as the operator types rather than
+   only on save — the earlier table-based editor reported this on save,
+   which is exactly after a typo has already been committed. */
+function validateBands() {
+  QTY.forEach(q => {
+    let prev = -Infinity, prevName = '';
+    BAND_LABEL.forEach((name, bi) => {
+      const id = `${q}-${bi}`;
+      const inp = $(`b-${id}-limit`);
+      const ref = $(`r-${id}`);
+      if (!inp || !ref) return;
+      const on = !document.querySelector(`[data-band="${id}"]`).classList.contains('off');
+      const v = parseFloat(inp.value);
+      inp.classList.remove('bad'); ref.classList.remove('bad');
+      if (!on) { ref.textContent = 'Disabled — ignored'; return; }
+      if (isNaN(v)) { inp.classList.add('bad'); ref.classList.add('bad'); ref.textContent = 'Enter a number'; return; }
+      if (v < prev) {
+        inp.classList.add('bad'); ref.classList.add('bad');
+        ref.textContent = `Must be ≥ ${prevName} (${prev})`;
+      } else {
+        const live = liveValueFor(q);
+        if (live !== null && v !== 0) {
+          /* bi < 2 (LoLo/Lo) is a lower-bound band: proximity to tripping
+             grows as the live value falls, so the ratio inverts — see
+             pctOfLimit's `under` for why this is not just cosmetic. */
+          const pct = pctOfLimit(live, v, bi < 2);
+          ref.textContent = pct !== null ? `now = ${pct.toFixed(0)}% of this limit` : '';
+        } else {
+          ref.textContent = '';
+        }
+      }
+      prev = v; prevName = name;
+    });
+  });
+}
+
+async function saveThresholds() {
+  const bands = {};
+  QTY.forEach(q => {
+    bands[q] = [0,1,2,3].map(bi => ({
+      enabled:      $(`b-${q}-${bi}-enabled`).checked,
+      limit:        Number($(`b-${q}-${bi}-limit`).value),
+      hysteresis:   Number($(`h-${q}-${bi}`).value),
+      on_delay_ms:  Number($(`d1-${q}-${bi}`).value),
+      off_delay_ms: Number($(`d2-${q}-${bi}`).value),
+      latching:     $(`l-${q}-${bi}`).checked,
+    }));
+  });
+
+  const body = { bands, sm: {
+    start_rpm:            num('sm-start'),
+    idle_current_a:       num('sm-idle'),
+    cut_detect_current_a: num('sm-cut'),
+    settle_ms:            num('sm-settle'),
+    alarm_inhibit_ms:     num('sm-inhibit'),
+  }};
+
+  setStatus('th-status','Saving…');
+  try {
+    await postJSON('/api/thresholds?spindle=' + $('th-spindle').value, body);
+    setStatus('th-status','Saved — pushed to the SMU.','ok');
+    refreshSpindleCfgCache();
+  } catch (e) { setStatus('th-status', 'Rejected: ' + e.message, 'err'); }
+}
+
+async function saveCalibration() {
+  const body = {
+    name: $('sp-name').value,
+    enabled: $('sp-enabled').checked,
+    current: {
+      ct_primary_amps:   num('cur-primary'),
+      ct_secondary_ma:   num('cur-secondary'),
+      gain_correction:   num('cur-gain'),
+      noload_cutoff_a:   num('cur-cutoff'),
+      rms_burst_samples: num('cur-burst'),
+    },
+    pressure: {
+      mode:              num('pre-mode'),
+      unit:              $('pre-unit').value,
+      sensor_min:        num('pre-min'),
+      sensor_max:        num('pre-max'),
+      gain_correction:   num('pre-gain'),
+      offset_correction: num('pre-offset'),
+    },
+    rpm: {
+      pulses_per_rev:   num('rpm-ppr'),
+      glitch_filter_ns: num('rpm-glitch'),
+      zero_timeout_ms:  num('rpm-timeout'),
+    },
+  };
+
+  setStatus('cal-status','Saving…');
+  try {
+    await postJSON('/api/calibration?spindle=' + $('cal-spindle').value, body);
+    setStatus('cal-status','Saved — pushed to the SMU.','ok');
+    loadSpindle();
+  } catch (e) { setStatus('cal-status','Rejected: ' + e.message, 'err'); }
+}
+
+/* ---------- calibration wizard ---------- */
+
+async function loadCalib() {
+  if (!$('tab-calibration').classList.contains('active')) return;
+  if (!spindleCfg) await loadSpindle();
+
+  let st;
+  try {
+    st = await getJSON('/api/calib?spindle=' + $('cal-spindle').value);
+  } catch (e) { return; }
+
+  const unit = spindleCfg ? spindleCfg.pressure.unit : '';
+
+  const cl = $('cal-cur-live');
+  cl.innerHTML = '';
+  cl.appendChild(row('Reading now', st.current.live_corrected.toFixed(3) + ' A'));
+  cl.appendChild(row('Uncorrected', st.current.live_nominal.toFixed(3) + ' A'));
+  cl.appendChild(row('Burden', (st.current.raw*1000).toFixed(2) + ' mV rms'));
+
+  const pl = $('cal-pre-live');
+  pl.innerHTML = '';
+  pl.appendChild(row('Reading now', st.pressure.live_corrected.toFixed(2) + ' ' + unit));
+  pl.appendChild(row('Uncorrected', st.pressure.live_nominal.toFixed(2) + ' ' + unit));
+  pl.appendChild(row('Loop current', st.pressure.raw.toFixed(3) + ' mA'));
+
+  const pts = $('cal-pre-points');
+  pts.innerHTML = '';
+  st.pressure.points.forEach((p, i) => {
+    if (!p.captured) return;
+    pts.appendChild(row('Point ' + (i+1) + ' captured',
+      'device ' + p.nominal.toFixed(2) + ' → reference ' + p.reference.toFixed(2)));
+  });
+}
+
+async function calibCapture(target, index) {
+  const statusId = target === 'pressure' ? 'cal-pre-status' : 'cal-cur-status';
+  const refId = target === 'pressure' ? ('cal-pre-ref' + index) : 'cal-cur-ref';
+  const reference = Number($(refId).value);
+  if (!isFinite(reference)) {
+    setStatus(statusId,'Enter the reference reading first.','err');
+    return;
+  }
+  try {
+    await postJSON('/api/calib?spindle=' + $('cal-spindle').value,
+      {target, action:'capture', index, reference});
+    setStatus(statusId,'Point ' + (index+1) + ' captured.','ok');
+    loadCalib();
+  } catch (e) { setStatus(statusId, e.message, 'err'); }
+}
+
+async function calibApply(target) {
+  const statusId = target === 'pressure' ? 'cal-pre-status' : 'cal-cur-status';
+  try {
+    await postJSON('/api/calib?spindle=' + $('cal-spindle').value,
+      {target, action:'apply'});
+    setStatus(statusId,'Calibration applied and pushed to the SMU.','ok');
+    loadSpindle(); loadCalib();
+  } catch (e) { setStatus(statusId, e.message, 'err'); }
+}
+
+async function calibReset(target) {
+  const statusId = target === 'pressure' ? 'cal-pre-status' : 'cal-cur-status';
+  try {
+    await postJSON('/api/calib?spindle=' + $('cal-spindle').value,
+      {target, action:'reset'});
+    setStatus(statusId,'Captured points cleared.','');
+    loadCalib();
+  } catch (e) { setStatus(statusId, e.message, 'err'); }
+}
+
+async function autozero() {
+  setStatus('az-status','Measuring…');
+  try {
+    await postJSON('/api/autozero?spindle=' + $('cal-spindle').value);
+    setStatus('az-status','SMU confirmed the new zero.','ok');
+    loadSpindle(); loadCalib();
+  } catch (e) { setStatus('az-status', e.message, 'err'); }
+}
+
+/* ---------- comms ---------- */
+
+async function loadComms() {
+  let cfg;
+  try { cfg = await getJSON('/api/config'); } catch (e) { return; }
+
+  const net = $('net-rows');
+  net.innerHTML = '';
+  net.appendChild(row('Station',
+    cfg.wifi.sta_connected ? cfg.wifi.sta_ip : 'not connected',
+    cfg.wifi.sta_connected ? 'ok' : 'muted'));
+  net.appendChild(row('Fallback AP', cfg.wifi.ap_ssid));
+  net.appendChild(row('AP address', cfg.wifi.ap_ip));
+
+  $('wifi-ssid').value = cfg.wifi.ssid || '';
+
+  const m = cfg.modbus;
+  $('mb-rtu-enabled').checked = m.rtu_enabled;
+  $('mb-baud').value   = m.baud;
+  $('mb-parity').value = m.parity;
+  $('mb-stop').value   = m.stop_bits;
+  $('mb-data').value   = m.data_bits;
+  $('mb-slave').value  = m.slave_id;
+  $('mb-tcp-enabled').checked = m.tcp_enabled;
+  $('mb-port').value   = m.tcp_port;
+}
+
+async function saveComms() {
+  const wifi = { ssid: $('wifi-ssid').value };
+  const pass = $('wifi-pass').value;
+  if (pass.length) wifi.password = pass;
+
+  const modbus = {
+    rtu_enabled: $('mb-rtu-enabled').checked,
+    baud:        num('mb-baud'),
+    parity:      num('mb-parity'),
+    stop_bits:   num('mb-stop'),
+    data_bits:   num('mb-data'),
+    slave_id:    num('mb-slave'),
+    tcp_enabled: $('mb-tcp-enabled').checked,
+    tcp_port:    num('mb-port'),
+  };
+
+  setStatus('comms-status','Saving…');
+  try {
+    await postJSON('/api/config', {wifi, modbus});
+    setStatus('comms-status','Saved and applied.','ok');
+    $('wifi-pass').value = '';
+    loadComms();
+  } catch (e) { setStatus('comms-status','Rejected: ' + e.message, 'err'); }
+}
+
+/* ---------- system ---------- */
+
+async function loadSystem() {
+  let s;
+  try { s = await getJSON('/api/system'); } catch (e) { return; }
+
+  const host = $('sys-rows');
+  host.innerHTML = '';
+  host.appendChild(row('Version', s.version));
+  host.appendChild(row('Built', s.build_date + ' ' + s.build_time));
+  host.appendChild(row('ESP-IDF', s.idf_version));
+  host.appendChild(row('Config schema', 'v' + s.schema_version));
+  host.appendChild(row('Uptime', fmtUptime(s.uptime_s)));
+  host.appendChild(row('Free heap',
+    (s.free_heap/1024).toFixed(1) + ' kB (min ' + (s.min_free_heap/1024).toFixed(1) + ')'));
+  host.appendChild(row('Last reset', s.reset_reason));
+  host.appendChild(row('Running slot', s.running_partition));
+  host.appendChild(row('Update slot', s.update_partition));
+  if (s.pending_verify)
+    host.appendChild(row('Firmware', 'on trial — confirming', 'warn'));
+}
+
+function uploadFirmware() {
+  const f = $('ota-file').files[0];
+  if (!f) { setStatus('ota-status','Choose a .bin file first.','err'); return; }
+
+  const bar = $('ota-progress');
+  bar.style.display = 'block'; bar.value = 0;
+  setStatus('ota-status','Uploading …');
+
+  /* XHR rather than fetch: it reports upload progress, which matters for a
+     ~1 MB transfer over WiFi where the user otherwise sees nothing. */
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST','/api/ota');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) bar.value = (e.loaded / e.total) * 100;
+  };
+  xhr.onload = () => {
+    let j = {};
+    try { j = JSON.parse(xhr.responseText); } catch (e) {}
+    if (j.status === 'ok') {
+      setStatus('ota-status','Update staged. Rebooting — this page will '
+        + 'reconnect in a few seconds.','ok');
+      setTimeout(() => location.reload(), 12000);
+    } else {
+      setStatus('ota-status','Failed: ' + (j.reason || 'unknown error'),'err');
+    }
+  };
+  xhr.onerror = () => setStatus('ota-status','Upload failed — connection lost.','err');
+  xhr.send(f);
+}
+
+async function reboot() {
+  if (!confirm('Reboot the ESP32? Each SMU keeps monitoring and driving its '
+    + 'own outputs the whole time — this only affects networking, the web UI '
+    + 'and Modbus while it restarts.')) return;
+  try {
+    await postJSON('/api/reboot');
+    setStatus('maint-status','Rebooting…','ok');
+    setTimeout(() => location.reload(), 10000);
+  } catch (e) { setStatus('maint-status', e.message, 'err'); }
+}
+
+async function factoryReset() {
+  if (!confirm('Restore factory defaults? Calibration, thresholds and comms '
+    + 'settings will all be lost.')) return;
+  try {
+    await postJSON('/api/factory-reset');
+    setStatus('maint-status','Defaults restored, rebooting…','ok');
+    setTimeout(() => location.reload(), 10000);
+  } catch (e) { setStatus('maint-status', e.message, 'err'); }
+}
+
+/* ---------- startup ---------- */
+
+pollTelemetry().then(() => { loadSpindle(); loadComms(); });
+refreshSpindleCfgCache().then(pollTelemetry);
+setInterval(pollTelemetry, 1000);
+setInterval(() => {
+  if ($('tab-trends').classList.contains('active')) loadHistory();
+  if ($('tab-calibration').classList.contains('active')) loadCalib();
+  if ($('tab-smu').classList.contains('active')) loadSmuStatus();
+}, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-ui-static",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8934", "--directory", "main/web", "--bind", "127.0.0.1"],
+      "port": 8934
+    }
+  ]
+}

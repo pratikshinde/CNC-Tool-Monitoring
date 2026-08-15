@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CNC Tool Monitor — V2 UI prototype</title>
+<style>
+/* ============================================================
+   V2 UI prototype — design language only, mock data.
+   Self-contained: no external requests of any kind.
+   See FIRMWARE_DESIGN_SPEC.md §5.5.
+   ============================================================ */
+
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel-2:#1c232c; --raised:#21293280;
+  --border:#2c343d; --border-strong:#3d4753;
+  --text:#e8eef4; --text-dim:#9aa7b4; --text-faint:#6b7785;
+  --accent:#4da3ff;
+  --ok:#3fb950; --ok-bg:#3fb9501f;
+  --warn:#e3a008; --warn-bg:#e3a0081f;
+  --alarm:#f85149; --alarm-bg:#f851491f;
+  --diag:#a371f7; --diag-bg:#a371f71f;
+  --stale:#7d8590; --stale-bg:#7d859026;
+  --r:10px; --r-sm:6px;
+  --shadow:0 1px 2px #0006, 0 4px 12px #0003;
+}
+@media (prefers-color-scheme:light){
+  :root{
+    --bg:#f2f5f8; --panel:#fff; --panel-2:#f6f8fa; --raised:#0d111708;
+    --border:#d6dde4; --border-strong:#bcc6d0;
+    --text:#111820; --text-dim:#5a6672; --text-faint:#8593a0;
+    --accent:#0a62c9;
+    --ok:#1a7f37; --ok-bg:#1a7f3714;
+    --warn:#9a6700; --warn-bg:#9a670014;
+    --alarm:#cf222e; --alarm-bg:#cf222e14;
+    --diag:#8250df; --diag-bg:#8250df14;
+    --stale:#6e7781; --stale-bg:#6e778118;
+    --shadow:0 1px 2px #0d111710, 0 4px 12px #0d111708;
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,sans-serif;
+  font-variant-numeric:tabular-nums;
+  -webkit-font-smoothing:antialiased;
+}
+/* Every live number is tabular + fixed slot so 2 Hz updates never reflow. */
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+
+/* ---------- header ---------- */
+header{
+  position:sticky;top:0;z-index:20;background:var(--panel);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:14px;padding:11px 18px;flex-wrap:wrap;
+}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.logo{
+  width:28px;height:28px;border-radius:7px;flex:none;
+  background:linear-gradient(140deg,var(--accent),#7ec2ff);
+  display:grid;place-items:center;color:#04121f;font-weight:700;font-size:13px;
+}
+.brand h1{font-size:15px;margin:0;font-weight:600;letter-spacing:-.01em;white-space:nowrap}
+.brand .sub{font-size:12px;color:var(--text-faint);white-space:nowrap}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* ---------- status pill: colour + icon + text, never colour alone ---------- */
+.pill{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:5px 11px;border-radius:999px;font-size:12.5px;font-weight:600;
+  border:1px solid transparent;white-space:nowrap;
+}
+.pill svg{width:13px;height:13px;flex:none}
+.pill.ok{background:var(--ok-bg);color:var(--ok);border-color:#3fb95040}
+.pill.warn{background:var(--warn-bg);color:var(--warn);border-color:#e3a00840}
+.pill.alarm{background:var(--alarm-bg);color:var(--alarm);border-color:#f8514940}
+.pill.diag{background:var(--diag-bg);color:var(--diag);border-color:#a371f740}
+.pill.stale{background:var(--stale-bg);color:var(--stale);border-color:#7d859040}
+.pill.idle{background:var(--raised);color:var(--text-dim);border-color:var(--border)}
+
+/* ---------- nav ---------- */
+nav{
+  position:sticky;top:53px;z-index:19;display:flex;gap:2px;
+  background:var(--panel);border-bottom:1px solid var(--border);
+  padding:0 10px;overflow-x:auto;scrollbar-width:none;
+}
+nav::-webkit-scrollbar{display:none}
+nav button{
+  background:none;border:0;border-bottom:2px solid transparent;
+  color:var(--text-dim);font:inherit;font-size:14px;font-weight:500;
+  padding:11px 14px;min-height:44px;cursor:pointer;white-space:nowrap;
+}
+nav button:hover{color:var(--text)}
+nav button[aria-selected=true]{color:var(--accent);border-bottom-color:var(--accent)}
+
+main{padding:16px;max-width:1180px;margin:0 auto}
+
+/* ---------- cards ---------- */
+.grid{display:grid;gap:14px;grid-template-columns:1fr}
+@media(min-width:860px){.grid{grid-template-columns:1fr 1fr}}
+
+.card{
+  background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden;
+  transition:opacity .2s;
+}
+.card-hd{
+  display:flex;align-items:center;gap:10px;padding:13px 16px;
+  border-bottom:1px solid var(--border);flex-wrap:wrap;
+}
+.card-hd h2{font-size:15px;margin:0;font-weight:600;letter-spacing:-.01em}
+.card-hd .right{margin-left:auto;display:flex;gap:6px;align-items:center}
+.card-bd{padding:16px}
+
+/* Staleness is visually loud — never silently show old data as live. */
+.card.is-stale{position:relative}
+.card.is-stale .readings,.card.is-stale .bands{opacity:.38;filter:saturate(.4)}
+.stale-banner{
+  display:flex;align-items:center;gap:8px;
+  background:var(--stale-bg);border-bottom:1px solid #7d859040;
+  color:var(--stale);font-size:12.5px;font-weight:600;padding:8px 16px;
+}
+.stale-banner svg{width:14px;height:14px;flex:none}
+
+/* ---------- readings ---------- */
+.readings{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;
+  background:var(--border);border-radius:var(--r-sm);overflow:hidden}
+.rd{background:var(--panel);padding:13px 12px;min-width:0}
+.rd .lbl{
+  font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--text-faint);margin-bottom:5px;white-space:nowrap
+}
+.rd .val{font-size:27px;font-weight:650;line-height:1.05;letter-spacing:-.025em}
+.rd .unit{font-size:13px;font-weight:500;color:var(--text-dim);margin-left:3px}
+.rd .sub{font-size:11.5px;color:var(--text-faint);margin-top:4px;height:16px}
+.rd.warn .val{color:var(--warn)} .rd.alarm .val{color:var(--alarm)}
+
+/* Below ~460px three-up readings squeeze a 5-digit RPM into ~78px and clip it.
+   Reflow to full-width rows instead of shrinking the type — on a phone at
+   arm's length the number needs to stay large. Label and context sit left,
+   value right, nothing truncates. */
+@media(max-width:460px){
+  .readings{grid-template-columns:1fr}
+  .rd{display:grid;grid-template-columns:1fr auto;column-gap:14px;padding:12px 14px}
+  .rd .lbl{margin-bottom:0;align-self:center}
+  .rd .val{grid-row:1/3;grid-column:2;align-self:center;text-align:right;font-size:26px}
+  .rd .sub{grid-column:1;margin-top:2px;height:auto}
+}
+
+/* ---------- band strip ---------- */
+.bands{margin-top:16px}
+.bands h3{
+  font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--text-faint);margin:0 0 9px}
+.brow{display:flex;align-items:center;gap:9px;margin-bottom:9px}
+.brow .name{font-size:12.5px;color:var(--text-dim);width:64px;flex:none}
+.track{
+  position:relative;flex:1;height:7px;border-radius:4px;background:var(--panel-2);
+  border:1px solid var(--border);overflow:hidden}
+.fill{position:absolute;inset:0 auto 0 0;border-radius:4px;transition:width .45s cubic-bezier(.4,0,.2,1)}
+.fill.ok{background:linear-gradient(90deg,#3fb95099,var(--ok))}
+.fill.warn{background:linear-gradient(90deg,#e3a00899,var(--warn))}
+.fill.alarm{background:linear-gradient(90deg,#f8514999,var(--alarm))}
+.tick{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--border-strong);opacity:.9}
+.brow .pct{font-size:12px;color:var(--text-faint);width:46px;text-align:right;flex:none}
+
+/* ---------- meta rows ---------- */
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
+  gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
+.meta div{min-width:0}
+.meta .k{font-size:10.5px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-faint);margin-bottom:3px}
+.meta .v{font-size:13.5px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- io chips ---------- */
+.io{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}
+.chip{
+  display:inline-flex;align-items:center;gap:6px;padding:5px 10px;
+  border-radius:var(--r-sm);border:1px solid var(--border);
+  background:var(--panel-2);font-size:12px;font-weight:550;color:var(--text-dim)}
+.chip .dot{width:7px;height:7px;border-radius:50%;background:var(--text-faint);flex:none}
+.chip.on{color:var(--ok);border-color:#3fb95040;background:var(--ok-bg)}
+.chip.on .dot{background:var(--ok);box-shadow:0 0 0 3px #3fb9502e}
+
+/* ============================================================
+   THRESHOLDS EDITOR
+   Replaces V1's 7-column table, which compressed each numeric input to
+   ~32 px at 375 px wide — two visible digits, and mis-entered limits
+   during a real test run.
+
+   Two changes fix it:
+   1. Progressive disclosure. Limit is the field that gets edited; the
+      other four are commissioning-time settings. Showing all six with
+      equal weight is what created the cramped grid.
+   2. One DOM, two layouts. Each band is a card that reflows into a row
+      on wide screens — no <table>, so nothing can compress below a
+      usable width.
+   ============================================================ */
+
+.qgroup{margin-bottom:16px}
+.qgroup-hd{display:flex;align-items:baseline;gap:9px;margin:0 0 9px;padding:0 2px}
+.qgroup-hd h3{font-size:14px;font-weight:650;margin:0;letter-spacing:-.01em}
+.qgroup-hd .live{font-size:12.5px;color:var(--text-faint)}
+.qgroup-hd .live b{color:var(--accent);font-weight:650}
+
+/* Column header — only meaningful in the wide/row layout. */
+.bhead{display:none}
+
+.band{
+  border:1px solid var(--border);border-radius:var(--r-sm);
+  background:var(--panel-2);margin-bottom:9px;overflow:hidden}
+.band.off{opacity:.55}
+.band-top{display:flex;align-items:center;gap:11px;padding:11px 13px}
+.band-name{font-size:14px;font-weight:650;min-width:52px}
+.band-top .spacer{margin-left:auto}
+
+/* Switch: 27 px of visible track, but a 44 px tappable area around it.
+   Looking right and being hittable with a glove are different problems. */
+.sw{position:relative;width:46px;min-height:44px;flex:none;cursor:pointer;
+  display:inline-flex;align-items:center}
+.sw input{position:absolute;inset:0;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.sw .track2{width:46px;height:27px;border-radius:999px;background:var(--border-strong);
+  transition:background .18s}
+.sw .knob{position:absolute;left:3px;top:50%;margin-top:-10.5px;
+  width:21px;height:21px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 3px #0006;transition:transform .18s}
+.sw input:checked + .track2{background:var(--ok)}
+.sw input:checked ~ .knob{transform:translateX(19px)}
+.sw input:focus-visible + .track2{outline:2px solid var(--accent);outline-offset:2px}
+
+/* The field that actually gets typed into. */
+.limit-row{padding:0 13px 12px;display:grid;gap:5px}
+.limit-row label{font-size:11px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-faint)}
+.inwrap{position:relative;display:flex;align-items:center}
+.inwrap input{
+  width:100%;
+  /* 16 px minimum: readable at arm's length, and stops mobile zoom-on-focus */
+  font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;
+  padding:12px 46px 12px 13px;   /* right pad clears the unit badge */
+  min-height:48px;               /* comfortably past the 44 px target */
+  background:var(--bg);color:var(--text);
+  border:1px solid var(--border-strong);border-radius:var(--r-sm);
+  font-family:inherit;-moz-appearance:textfield;
+}
+.inwrap input::-webkit-outer-spin-button,
+.inwrap input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.inwrap input:focus{outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 3px #4da3ff33}
+.inwrap input.bad{border-color:var(--alarm);box-shadow:0 0 0 3px #f8514933}
+.unit{position:absolute;right:12px;font-size:13px;font-weight:600;
+  color:var(--text-faint);pointer-events:none}
+.ref{font-size:12px;color:var(--text-faint);min-height:17px}
+.ref b{color:var(--text-dim);font-weight:600}
+.ref.bad{color:var(--alarm)}
+
+/* Advanced disclosure — hidden by default, which is the whole point. */
+.adv{border-top:1px solid var(--border)}
+.adv summary{
+  list-style:none;cursor:pointer;padding:11px 13px;min-height:44px;
+  display:flex;align-items:center;gap:7px;
+  font-size:12.5px;font-weight:600;color:var(--text-dim)}
+.adv summary::-webkit-details-marker{display:none}
+.adv summary .caret{transition:transform .18s;font-size:10px}
+.adv[open] summary .caret{transform:rotate(90deg)}
+.adv summary:hover{color:var(--text)}
+.advgrid{padding:0 13px 13px;display:grid;gap:11px;grid-template-columns:1fr 1fr}
+.advgrid .f{display:grid;gap:5px}
+.advgrid .f.wide{grid-column:1/-1;display:flex;align-items:center;gap:11px}
+.advgrid label{font-size:11px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-faint)}
+.advgrid .inwrap input{font-size:15px;min-height:44px;padding:10px 40px 10px 11px}
+
+.saverow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding-top:14px;margin-top:4px;border-top:1px solid var(--border)}
+.btn{
+  background:var(--accent);color:#04121f;border:0;border-radius:var(--r-sm);
+  padding:12px 20px;min-height:48px;font:inherit;font-size:15px;font-weight:650;
+  cursor:pointer}
+.btn:hover{filter:brightness(1.08)}
+.btn.sec{background:var(--panel-2);color:var(--text);border:1px solid var(--border-strong)}
+.errline{font-size:13px;color:var(--alarm);font-weight:600}
+
+/* ---- wide layout: the card becomes a row, header row appears ---- */
+@media(min-width:760px){
+  .bhead{
+    display:grid;grid-template-columns:80px 62px 1fr 1fr 1fr 1fr 74px;
+    gap:11px;padding:0 13px 7px;align-items:end}
+  .bhead span{font-size:10.5px;font-weight:700;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--text-faint)}
+  .band{background:transparent;border:0;border-bottom:1px solid var(--border);
+    border-radius:0;margin-bottom:0;
+    display:grid;grid-template-columns:80px 62px 1fr 1fr 1fr 1fr 74px;
+    gap:11px;padding:9px 13px;align-items:center}
+  .band-top{padding:0;display:contents}
+  .band-top .spacer{display:none}
+  .band-name{min-width:0}
+  .limit-row{padding:0;display:block}
+  .limit-row label{display:none}
+  .ref{display:none}
+  .adv{border:0;display:contents}
+  .adv summary{display:none}
+  .advgrid{padding:0;display:contents}
+  .advgrid .f{display:block}
+  .advgrid .f label{display:none}
+  .advgrid .f.wide{display:flex;justify-content:flex-start}
+  .inwrap input,.advgrid .inwrap input{
+    font-size:15px;min-height:44px;padding:10px 34px 10px 10px}
+  .unit{right:9px;font-size:11.5px}
+}
+
+/* ---------- diagnostics ---------- */
+.diagbox{margin-top:14px;border:1px solid #a371f740;background:var(--diag-bg);
+  border-radius:var(--r-sm);padding:11px 13px}
+.diagbox .t{display:flex;align-items:center;gap:7px;font-size:12.5px;
+  font-weight:650;color:var(--diag);margin-bottom:5px}
+.diagbox .t svg{width:14px;height:14px}
+.diagbox p{margin:0;font-size:12.5px;color:var(--text-dim);line-height:1.5}
+
+.foot{max-width:1180px;margin:22px auto 0;padding:0 16px 26px;
+  color:var(--text-faint);font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
+.foot b{color:var(--text-dim);font-weight:600}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="logo">CM</div>
+    <div>
+      <h1>CNC Tool Monitor</h1>
+      <div class="sub">Line 3 · Twin spindle</div>
+    </div>
+  </div>
+  <div class="hdr-right">
+    <span class="pill ok" id="hp">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zm3.7 5.9l-4.4 4.9a.8.8 0 01-1.2 0L4 8.8a.8.8 0 011.2-1L6.7 9.5l3.8-4.3a.8.8 0 011.2 1.1z"/></svg>
+      System healthy
+    </span>
+    <span class="pill idle" id="clock">— — —</span>
+  </div>
+</header>
+
+<nav role="tablist">
+  <button role="tab" aria-selected="true"  onclick="showTab(0,this)">Dashboard</button>
+  <button role="tab" aria-selected="false" onclick="showTab(1,this)">Thresholds</button>
+  <button role="tab" aria-selected="false">Calibration</button>
+  <button role="tab" aria-selected="false">Trends</button>
+  <button role="tab" aria-selected="false">SMU status</button>
+  <button role="tab" aria-selected="false">Network</button>
+  <button role="tab" aria-selected="false">System</button>
+</nav>
+
+<main>
+  <div class="grid" id="grid"></div>
+
+  <div id="thresholds" hidden>
+    <section class="card">
+      <div class="card-hd">
+        <h2>Thresholds</h2>
+        <div class="right"><span class="pill idle" id="th-sp">Spindle 1</span></div>
+      </div>
+      <div class="card-bd" id="th-body"></div>
+    </section>
+  </div>
+</main>
+
+<footer class="foot">
+  <span><b>Prototype</b> — mock data, design language only</span>
+  <span><b>Self-contained</b> — no external requests</span>
+  <span><b>Try:</b> resize the window, or switch OS light/dark</span>
+</footer>
+
+<script>
+/* ------------------------------------------------------------
+   Mock telemetry. Spindle 1 runs healthy; spindle 2 demonstrates
+   a stale link — the case the UI must never render as live.
+   ------------------------------------------------------------ */
+const SVG = {
+  check:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zm3.7 5.9l-4.4 4.9a.8.8 0 01-1.2 0L4 8.8a.8.8 0 011.2-1L6.7 9.5l3.8-4.3a.8.8 0 011.2 1.1z"/></svg>',
+  warn:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.9 1.5l6.3 11a1 1 0 01-.9 1.5H1.7a1 1 0 01-.9-1.5l6.3-11a1 1 0 011.8 0zM8 5a.8.8 0 00-.8.9l.3 3a.5.5 0 001 0l.3-3A.8.8 0 008 5zm0 7a.9.9 0 100-1.8.9.9 0 000 1.8z"/></svg>',
+  stale:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zM7.2 3.6h1.6v5.1H7.2zm0 6.6h1.6v1.7H7.2z"/></svg>',
+  diag:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M6 1.5A1.5 1.5 0 017.5 0h1A1.5 1.5 0 0110 1.5V7l3.6 6.2a1.5 1.5 0 01-1.3 2.3H3.7a1.5 1.5 0 01-1.3-2.3L6 7z"/></svg>',
+  cut:'<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 8a6 6 0 1112 0A6 6 0 012 8zm6-3.5A3.5 3.5 0 1011.5 8 3.5 3.5 0 008 4.5z"/></svg>'
+};
+
+const spindles = [
+  {
+    id:1, name:'Spindle 1', stale:false, state:'CUTTING', armed:true, sev:'ok',
+    current:{v:12.84,u:'A',pct:58,band:'ok'},
+    pressure:{v:41.2,u:'bar',pct:44,band:'ok'},
+    rpm:{v:8420,u:'rpm',pct:71,band:'ok'},
+    avg:'12.71 A avg', pk:'peak 14.02 A', dev:'+0.4 σ',
+    meta:[['Cycle','1,284'],['Last cycle','42.6 s'],['Baseline','Valid · 20 cyc'],['Deviation','+0.4 σ']],
+    io:[['Machine running',true],['Fault clear',false]],
+    diag:null
+  },
+  {
+    id:2, name:'Spindle 2', stale:true, staleAge:'41 s', state:'CUTTING', armed:true, sev:'stale',
+    current:{v:9.06,u:'A',pct:41,band:'ok'},
+    pressure:{v:38.7,u:'bar',pct:39,band:'ok'},
+    rpm:{v:7980,u:'rpm',pct:66,band:'ok'},
+    avg:'9.11 A avg', pk:'peak 10.4 A', dev:'—',
+    meta:[['Cycle','1,190'],['Last cycle','44.1 s'],['Baseline','Learning · 12/20'],['Deviation','—']],
+    io:[['Machine running',true],['Fault clear',false]],
+    diag:{t:'Telemetry link degraded',
+          p:'Last good frame 41 s ago. The SMU is still monitoring and its hard-wired outputs remain correct — only this display is out of date. Values below are the last known good readings, not live.'}
+  }
+];
+
+const pill = (cls,icon,txt)=>`<span class="pill ${cls}">${SVG[icon]}${txt}</span>`;
+
+function bandRow(name,d){
+  return `<div class="brow">
+    <span class="name">${name}</span>
+    <span class="track">
+      <span class="fill ${d.band}" style="width:${d.pct}%"></span>
+      <span class="tick" style="left:70%"></span>
+      <span class="tick" style="left:88%"></span>
+    </span>
+    <span class="pct num">${d.pct}%</span>
+  </div>`;
+}
+
+function card(s){
+  const statusPill = s.stale
+    ? pill('stale','stale',`Stale · ${s.staleAge}`)
+    : pill('ok','check','Armed · cutting');
+
+  return `<section class="card ${s.stale?'is-stale':''}">
+    <div class="card-hd">
+      <h2>${s.name}</h2>
+      <div class="right">${statusPill}</div>
+    </div>
+    ${s.stale?`<div class="stale-banner">${SVG.stale}Showing last known good data — not live</div>`:''}
+    <div class="card-bd">
+      <div class="readings">
+        <div class="rd">
+          <div class="lbl">Current</div>
+          <div class="val num">${s.current.v.toFixed(2)}<span class="unit">${s.current.u}</span></div>
+          <div class="sub">${s.avg}</div>
+        </div>
+        <div class="rd">
+          <div class="lbl">Pressure</div>
+          <div class="val num">${s.pressure.v.toFixed(1)}<span class="unit">${s.pressure.u}</span></div>
+          <div class="sub">${s.pk}</div>
+        </div>
+        <div class="rd">
+          <div class="lbl">Speed</div>
+          <div class="val num">${s.rpm.v.toLocaleString()}<span class="unit">${s.rpm.u}</span></div>
+          <div class="sub">dev ${s.dev}</div>
+        </div>
+      </div>
+
+      <div class="bands">
+        <h3>Margin to limit</h3>
+        ${bandRow('Current',s.current)}
+        ${bandRow('Pressure',s.pressure)}
+        ${bandRow('Speed',s.rpm)}
+      </div>
+
+      ${s.diag?`<div class="diagbox">
+        <div class="t">${SVG.diag}${s.diag.t}</div>
+        <p>${s.diag.p}</p>
+      </div>`:''}
+
+      <div class="io">
+        ${s.io.map(([n,on])=>`<span class="chip ${on?'on':''}"><span class="dot"></span>${n}</span>`).join('')}
+        <span class="chip">4–20 mA</span>
+      </div>
+
+      <div class="meta">
+        ${s.meta.map(([k,v])=>`<div><div class="k">${k}</div><div class="v num">${v}</div></div>`).join('')}
+      </div>
+    </div>
+  </section>`;
+}
+
+document.getElementById('grid').innerHTML = spindles.map(card).join('');
+
+/* ------------------------------------------------------------
+   Thresholds editor
+   ------------------------------------------------------------ */
+const QTY = [
+  {k:'current',  label:'Current',  unit:'A',   step:'0.1', live:12.84, dp:2},
+  {k:'pressure', label:'Pressure', unit:'bar', step:'0.5', live:41.2,  dp:1},
+  {k:'rpm',      label:'Speed',    unit:'rpm', step:'10',  live:8420,  dp:0}
+];
+const BANDS = ['LoLo','Lo','Hi','HiHi'];
+
+// [enabled, limit, hysteresis, onDelay, offDelay, latching]
+const cfg = {
+  current : [[false,0,0,0,0,false],[false,2,0.3,500,1000,false],
+             [true,18.5,0.5,500,1000,false],[true,22,0.5,200,1000,true]],
+  pressure: [[true,12,1,1000,2000,false],[true,25,1,1000,2000,false],
+             [true,68,1.5,1000,2000,false],[false,85,2,500,2000,true]],
+  rpm     : [[false,0,0,0,0,false],[true,6500,80,1500,2000,false],
+             [true,11000,100,1500,2000,false],[false,12500,120,800,2000,true]]
+};
+
+function bandCard(q, bi){
+  const b = cfg[q.k][bi];
+  const [on, limit, hyst, onD, offD, latch] = b;
+  const id = `${q.k}-${bi}`;
+  return `
+  <div class="band ${on?'':'off'}" data-band="${id}">
+    <div class="band-top">
+      <span class="band-name">${BANDS[bi]}</span>
+      <span class="spacer"></span>
+      <label class="sw" title="Enable ${BANDS[bi]}">
+        <input type="checkbox" ${on?'checked':''} onchange="toggleBand('${id}',this.checked)">
+        <span class="track2"></span><span class="knob"></span>
+      </label>
+    </div>
+
+    <div class="limit-row">
+      <label for="i-${id}">Limit</label>
+      <span class="inwrap">
+        <input id="i-${id}" type="number" inputmode="decimal" step="${q.step}"
+               value="${limit}" data-q="${q.k}" data-bi="${bi}" oninput="validate()">
+        <span class="unit">${q.unit}</span>
+      </span>
+      <span class="ref" id="r-${id}"></span>
+    </div>
+
+    <details class="adv">
+      <summary><span class="caret">▶</span>Advanced</summary>
+      <div class="advgrid">
+        <div class="f"><label for="h-${id}">Hysteresis</label>
+          <span class="inwrap"><input id="h-${id}" type="number" inputmode="decimal"
+            step="${q.step}" value="${hyst}"><span class="unit">${q.unit}</span></span></div>
+        <div class="f"><label for="d1-${id}">On delay</label>
+          <span class="inwrap"><input id="d1-${id}" type="number" inputmode="numeric"
+            step="50" value="${onD}"><span class="unit">ms</span></span></div>
+        <div class="f"><label for="d2-${id}">Off delay</label>
+          <span class="inwrap"><input id="d2-${id}" type="number" inputmode="numeric"
+            step="50" value="${offD}"><span class="unit">ms</span></span></div>
+        <div class="f wide">
+          <label class="sw"><input type="checkbox" ${latch?'checked':''}>
+            <span class="track2"></span><span class="knob"></span></label>
+          <label style="text-transform:none;font-size:13px;color:var(--text-dim)">Latching</label>
+        </div>
+      </div>
+    </details>
+  </div>`;
+}
+
+function renderThresholds(){
+  document.getElementById('th-body').innerHTML = QTY.map(q => `
+    <div class="qgroup">
+      <div class="qgroup-hd">
+        <h3>${q.label}</h3>
+        <span class="live">now <b class="num">${q.live.toLocaleString()} ${q.unit}</b></span>
+      </div>
+      <div class="bhead">
+        <span>Band</span><span>On</span><span>Limit</span>
+        <span>Hysteresis</span><span>On delay</span><span>Off delay</span><span>Latch</span>
+      </div>
+      ${BANDS.map((_,bi)=>bandCard(q,bi)).join('')}
+    </div>`).join('') + `
+    <div class="saverow">
+      <button class="btn" onclick="fakeSave()">Save thresholds</button>
+      <button class="btn sec">Revert</button>
+      <span class="errline" id="th-err"></span>
+    </div>`;
+  validate();
+}
+
+function toggleBand(id,on){
+  const el = document.querySelector(`[data-band="${id}"]`);
+  el.classList.toggle('off',!on);
+  validate();
+}
+
+/* Inline ordering validation. V1 only reported this on save, which is
+   exactly when a typo has already been committed. */
+function validate(){
+  let err = '';
+  QTY.forEach(q=>{
+    let prev = -Infinity, prevName = '';
+    BANDS.forEach((name,bi)=>{
+      const inp = document.getElementById(`i-${q.k}-${bi}`);
+      const ref = document.getElementById(`r-${q.k}-${bi}`);
+      const on  = !document.querySelector(`[data-band="${q.k}-${bi}"]`).classList.contains('off');
+      const v   = parseFloat(inp.value);
+      inp.classList.remove('bad'); ref.classList.remove('bad');
+      if(!on){ ref.textContent='Disabled — ignored'; return; }
+      if(isNaN(v)){ inp.classList.add('bad'); ref.textContent='Enter a number'; ref.classList.add('bad'); err='Some limits are not numbers'; return; }
+      if(v < prev){
+        inp.classList.add('bad'); ref.classList.add('bad');
+        ref.textContent = `Must be ≥ ${prevName} (${prev})`;
+        err = `${q.label}: ${name} is below ${prevName}`;
+      } else {
+        const pctOf = q.live/v*100;
+        ref.innerHTML = isFinite(pctOf)
+          ? `now <b>${q.live.toLocaleString()}</b> = <b>${pctOf.toFixed(0)}%</b> of this limit`
+          : '';
+      }
+      prev = v; prevName = name;
+    });
+  });
+  const e = document.getElementById('th-err');
+  if(e) e.textContent = err;
+}
+
+function fakeSave(){
+  const e = document.getElementById('th-err');
+  e.style.color = e.textContent ? '' : 'var(--ok)';
+  if(!e.textContent) e.textContent = 'Saved — pushed to SMU 1, commit acknowledged';
+}
+
+function showTab(i,btn){
+  document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-selected','false'));
+  btn.setAttribute('aria-selected','true');
+  document.getElementById('grid').hidden = i!==0;
+  document.getElementById('thresholds').hidden = i!==1;
+  if(i===1 && !document.getElementById('th-body').innerHTML) renderThresholds();
+}
+
+/* Live-ish jitter, to show that updating values do not shift the layout. */
+const base = spindles.map(s=>({c:s.current.v,p:s.pressure.v,r:s.rpm.v}));
+setInterval(()=>{
+  document.querySelectorAll('.card').forEach((el,i)=>{
+    if(spindles[i].stale) return;                 // stale panels must not animate
+    const v = el.querySelectorAll('.rd .val');
+    const c = base[i].c + (Math.random()-.5)*1.4;
+    const p = base[i].p + (Math.random()-.5)*1.1;
+    const r = base[i].r + Math.round((Math.random()-.5)*90);
+    v[0].innerHTML = c.toFixed(2)+'<span class="unit">A</span>';
+    v[1].innerHTML = p.toFixed(1)+'<span class="unit">bar</span>';
+    v[2].innerHTML = r.toLocaleString()+'<span class="unit">rpm</span>';
+    const f = el.querySelectorAll('.fill');
+    f[0].style.width = Math.min(96,Math.max(8,c/22*100)).toFixed(1)+'%';
+    f[1].style.width = Math.min(96,Math.max(8,p/94*100)).toFixed(1)+'%';
+  });
+  const d = new Date();
+  document.getElementById('clock').textContent =
+    d.toTimeString().slice(0,8) + ' · 20 Hz';
+},500);
+</script>
+</body>
+</html>

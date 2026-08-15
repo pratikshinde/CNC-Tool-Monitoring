@@ -1,0 +1,16 @@
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.4mb.scratch
+partitions_4mb_scratch.csv
+managed_components/
+dependencies.lock
+
+host_test/run_tests
+host_test/run_tests.exe
+host_test/*.o
+
+.fuse_hidden*
+*.swp
+.vscode/
+.DS_Store
