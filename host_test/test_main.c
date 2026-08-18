@@ -26,6 +26,7 @@
 #include "smu_proto.h"
 #include "smu_pack.h"
 #include "smu_link.h"
+#include "job_template.h"
 
 static int g_pass, g_fail;
 
@@ -1508,6 +1509,248 @@ static void test_smu_link(void)
 }
 
 /* ============================================================
+ * Job templates (main/job_template.c)
+ *
+ * The first test below is the load-bearing one for the whole job-template
+ * feature. Everything else here is ordinary coverage; that one is a guard
+ * against a specific silent failure: if someone later adds a machine field to
+ * job_profile_t or writes one in job_profile_apply(), calibration starts
+ * travelling between machines and NOTHING looks broken -- the device runs, the
+ * diagnostics pass, and every reading is quietly wrong by the ratio between
+ * the two machines' correction factors. Do not delete it.
+ * ============================================================ */
+
+/* Fills a spindle config with distinctive, non-default machine values, so a
+ * leak from one config into another is obvious rather than coincidentally
+ * equal to whatever the default happened to be. */
+static void make_machine(spindle_cfg_t *s, int index, float ct_amps,
+                         const char *unit, float p_min, float p_max)
+{
+    spindle_cfg_set_defaults(s, index);
+    s->current.ct_primary_amps   = ct_amps;
+    s->current.ct_secondary_ma   = 1000.0f + (float)index;
+    s->current.gain_correction   = 0.5f + (float)index * 0.01f;
+    s->current.zero_offset_v     = 1.6f + (float)index * 0.01f;
+    s->current.noload_cutoff_a   = 0.3f + (float)index * 0.01f;
+    s->current.rms_burst_samples = (uint16_t)(128 + index);
+    s->pressure.sensor_min       = p_min;
+    s->pressure.sensor_max       = p_max;
+    s->pressure.gain_correction  = 1.1f + (float)index * 0.01f;
+    s->pressure.offset_correction = 0.2f + (float)index * 0.01f;
+    s->pressure.mode             = (index == 0) ? PRESSURE_INPUT_4_20MA
+                                                : PRESSURE_INPUT_0_10V;
+    snprintf(s->pressure.unit, CFG_UNIT_LEN, "%s", unit);
+    s->rpm.pulses_per_rev        = (uint16_t)(1 + index);
+    s->rpm.glitch_filter_ns      = (uint16_t)(50000 + index);
+    s->rpm.zero_timeout_ms       = (uint16_t)(500 + index);
+    snprintf(s->name, CFG_NAME_LEN, "Machine spindle %d", index);
+}
+
+static void test_job_template_machine_fields_survive(void)
+{
+    section("job template: machine fields survive an apply");
+
+    /* Two DIFFERENT machines: different CT rating, different sensor span,
+     * different calibration, different everything machine-shaped. */
+    spindle_cfg_t source, dest, dest_before;
+    make_machine(&source, 0, 30.0f, "bar", 0.0f, 250.0f);
+    make_machine(&dest,   1, 100.0f, "bar", 0.0f, 400.0f);
+
+    /* Give the source distinctive JOB values so we can prove they DID move. */
+    source.sm.cut_detect_current_a = 7.25f;
+    source.sm.idle_current_a       = 2.5f;
+    source.sm.start_rpm            = 123.0f;
+    source.min_pulse_ms            = 2500;
+    source.machine_running_enabled = true;
+    source.wear.breakage_drop_pct  = 44;
+    source.wear.trend_cycles       = 9;
+    source.bands[QTY_CURRENT][BAND_HI].enabled = true;
+    source.bands[QTY_CURRENT][BAND_HI].limit   = 21.5f;
+    source.bands[QTY_PRESSURE][BAND_LO].enabled = true;
+    source.bands[QTY_PRESSURE][BAND_LO].limit   = 11.5f;
+
+    dest_before = dest;   /* byte-for-byte snapshot before the apply */
+
+    job_profile_t prof;
+    job_profile_extract(&source, &prof);
+    job_profile_apply(&prof, &dest);
+
+    /* --- The job half MUST have moved ---------------------------------- */
+    CHECK(CLOSE(dest.sm.cut_detect_current_a, 7.25f, 0.001f),
+          "cut-detect current is job data and must transfer");
+    CHECK(CLOSE(dest.sm.start_rpm, 123.0f, 0.001f),
+          "start RPM is job data and must transfer");
+    CHECK(dest.min_pulse_ms == 2500, "min_pulse_ms is job data and must transfer");
+    CHECK(dest.wear.breakage_drop_pct == 44, "wear settings are job data");
+    CHECK(dest.wear.trend_cycles == 9, "wear trend cycles are job data");
+    CHECK(dest.bands[QTY_CURRENT][BAND_HI].enabled &&
+          CLOSE(dest.bands[QTY_CURRENT][BAND_HI].limit, 21.5f, 0.001f),
+          "threshold bands are job data and must transfer");
+    CHECK(CLOSE(dest.bands[QTY_PRESSURE][BAND_LO].limit, 11.5f, 0.001f),
+          "all quantities' bands transfer, not just current");
+
+    /* --- The machine half MUST NOT have moved --------------------------
+     * Each of these, if it leaked, produces a device that runs perfectly and
+     * reads wrong forever. */
+    CHECK(CLOSE(dest.current.ct_primary_amps, dest_before.current.ct_primary_amps, 0.0001f),
+          "CT rating must NOT be overwritten by a job template");
+    CHECK(CLOSE(dest.current.ct_secondary_ma, dest_before.current.ct_secondary_ma, 0.0001f),
+          "CT secondary must NOT be overwritten");
+    CHECK(CLOSE(dest.current.gain_correction, dest_before.current.gain_correction, 0.0001f),
+          "current gain correction must NOT be overwritten -- this is THE bug this guards");
+    CHECK(CLOSE(dest.current.zero_offset_v, dest_before.current.zero_offset_v, 0.0001f),
+          "auto-zero tare must NOT be overwritten");
+    CHECK(CLOSE(dest.current.noload_cutoff_a, dest_before.current.noload_cutoff_a, 0.0001f),
+          "no-load cutoff must NOT be overwritten");
+    CHECK(dest.current.rms_burst_samples == dest_before.current.rms_burst_samples,
+          "RMS burst samples must NOT be overwritten");
+    CHECK(CLOSE(dest.pressure.sensor_min, dest_before.pressure.sensor_min, 0.0001f),
+          "pressure sensor min must NOT be overwritten");
+    CHECK(CLOSE(dest.pressure.sensor_max, dest_before.pressure.sensor_max, 0.0001f),
+          "pressure sensor max must NOT be overwritten");
+    CHECK(CLOSE(dest.pressure.gain_correction, dest_before.pressure.gain_correction, 0.0001f),
+          "pressure gain correction must NOT be overwritten");
+    CHECK(CLOSE(dest.pressure.offset_correction, dest_before.pressure.offset_correction, 0.0001f),
+          "pressure offset correction must NOT be overwritten");
+    CHECK(dest.pressure.mode == dest_before.pressure.mode,
+          "pressure input mode must NOT be overwritten");
+    CHECK(strcmp(dest.pressure.unit, dest_before.pressure.unit) == 0,
+          "pressure unit must NOT be overwritten");
+    CHECK(dest.rpm.pulses_per_rev == dest_before.rpm.pulses_per_rev,
+          "pulses-per-rev must NOT be overwritten");
+    CHECK(dest.rpm.glitch_filter_ns == dest_before.rpm.glitch_filter_ns,
+          "glitch filter must NOT be overwritten");
+    CHECK(dest.rpm.zero_timeout_ms == dest_before.rpm.zero_timeout_ms,
+          "zero timeout must NOT be overwritten");
+    CHECK(strcmp(dest.name, dest_before.name) == 0,
+          "the spindle's own name must NOT be overwritten by a job template");
+}
+
+static void test_job_check_unit_mismatch(void)
+{
+    section("job template: pressure unit mismatch is a hard refusal");
+
+    spindle_cfg_t source, dest;
+    make_machine(&source, 0, 30.0f, "bar", 0.0f, 250.0f);
+    make_machine(&dest,   1, 30.0f, "psi", 0.0f, 3600.0f);
+
+    job_profile_t prof;
+    job_context_t ctx;
+    job_profile_extract(&source, &prof);
+    job_context_extract(&source, &ctx);
+
+    job_warnings_t warn;
+    job_check_result_t r = job_check(&prof, &ctx, &dest, 8, 8, &warn);
+    CHECK(r == JOB_ERR_UNIT_MISMATCH,
+          "a bar template on a psi machine must be refused, not warned -- the "
+          "error is in the permissive direction");
+
+    /* Same unit on both sides is fine. */
+    spindle_cfg_t dest_bar;
+    make_machine(&dest_bar, 1, 30.0f, "bar", 0.0f, 250.0f);
+    r = job_check(&prof, &ctx, &dest_bar, 8, 8, &warn);
+    CHECK(r == JOB_OK, "matching units pass");
+
+    /* A same-machine spindle-to-spindle copy passes NULL context and must not
+     * trip the unit check. */
+    r = job_check(&prof, NULL, &dest, 8, 8, &warn);
+    CHECK(r == JOB_OK, "a NULL context (same-machine copy) skips the unit check");
+}
+
+static void test_job_check_schema_version(void)
+{
+    section("job template: schema version gate");
+
+    spindle_cfg_t s;
+    make_machine(&s, 0, 30.0f, "bar", 0.0f, 250.0f);
+
+    job_profile_t prof;
+    job_context_t ctx;
+    job_profile_extract(&s, &prof);
+    job_context_extract(&s, &ctx);
+
+    job_warnings_t warn;
+    CHECK(job_check(&prof, &ctx, &s, 9, 8, &warn) == JOB_ERR_SCHEMA_NEWER,
+          "a template from newer firmware must be refused");
+    CHECK(job_check(&prof, &ctx, &s, 8, 8, &warn) == JOB_OK,
+          "same schema version is accepted");
+    CHECK(job_check(&prof, &ctx, &s, 7, 8, &warn) == JOB_OK,
+          "an older template is accepted (fields it lacks keep their defaults)");
+}
+
+static void test_job_check_reachability(void)
+{
+    section("job template: unreachable band warnings");
+
+    spindle_cfg_t source, dest;
+    make_machine(&source, 0, 100.0f, "bar", 0.0f, 400.0f);  /* big machine   */
+    make_machine(&dest,   1, 30.0f,  "bar", 0.0f, 250.0f);  /* small machine */
+
+    /* Disable everything, then enable exactly the bands under test, so the
+     * warning list contains only what this test put there. */
+    for (int q = 0; q < QTY_COUNT; q++)
+        for (int b = 0; b < BAND_COUNT; b++)
+            source.bands[q][b].enabled = false;
+
+    /* 45 A high band on a 30 A CT: can never be reached. */
+    source.bands[QTY_CURRENT][BAND_HIHI].enabled = true;
+    source.bands[QTY_CURRENT][BAND_HIHI].limit   = 45.0f;
+
+    /* 300 bar high band on a 250 bar sensor: can never be reached. */
+    source.bands[QTY_PRESSURE][BAND_HI].enabled = true;
+    source.bands[QTY_PRESSURE][BAND_HI].limit   = 300.0f;
+
+    /* 300 bar LOW band on a 250 bar sensor: pressure is always below it, so
+     * it trips permanently -- a different problem from "never trips", and
+     * worth telling the operator apart. */
+    source.bands[QTY_PRESSURE][BAND_LO].enabled = true;
+    source.bands[QTY_PRESSURE][BAND_LO].limit   = 300.0f;
+
+    job_profile_t prof;
+    job_context_t ctx;
+    job_profile_extract(&source, &prof);
+    job_context_extract(&source, &ctx);
+
+    job_warnings_t warn;
+    job_check_result_t r = job_check(&prof, &ctx, &dest, 8, 8, &warn);
+
+    CHECK(r == JOB_OK,
+          "unreachable bands warn but do NOT block -- the product decision is "
+          "warn-and-apply, made safe by refusing to apply at all while cutting");
+    CHECK(warn.count == 3, "expected 3 warnings, got %u", warn.count);
+
+    bool saw_current_never = false, saw_pressure_never = false, saw_pressure_always = false;
+    for (int i = 0; i < warn.count; i++) {
+        if (warn.item[i].qty == QTY_CURRENT && warn.item[i].band == BAND_HIHI &&
+            warn.item[i].kind == JOB_WARN_NEVER_TRIPS) saw_current_never = true;
+        if (warn.item[i].qty == QTY_PRESSURE && warn.item[i].band == BAND_HI &&
+            warn.item[i].kind == JOB_WARN_NEVER_TRIPS) saw_pressure_never = true;
+        if (warn.item[i].qty == QTY_PRESSURE && warn.item[i].band == BAND_LO &&
+            warn.item[i].kind == JOB_WARN_ALWAYS_TRIPS) saw_pressure_always = true;
+    }
+    CHECK(saw_current_never, "45 A band on a 30 A CT must warn that it never trips");
+    CHECK(saw_pressure_never, "300 bar high band on a 250 bar sensor must warn");
+    CHECK(saw_pressure_always, "300 bar LOW band on a 250 bar sensor trips constantly");
+
+    /* The same template applied back onto its own (larger) machine is clean. */
+    r = job_check(&prof, &ctx, &source, 8, 8, &warn);
+    CHECK(r == JOB_OK && warn.count == 0,
+          "reachable bands produce no warnings, got %u", warn.count);
+
+    /* A DISABLED band with a wild value must not warn -- the UI already
+     * labels those "ignored", and warning about them would train operators
+     * to dismiss the warning banner. */
+    for (int q = 0; q < QTY_COUNT; q++)
+        for (int b = 0; b < BAND_COUNT; b++)
+            source.bands[q][b].enabled = false;
+    source.bands[QTY_CURRENT][BAND_HIHI].limit = 9999.0f;
+    job_profile_extract(&source, &prof);
+    r = job_check(&prof, &ctx, &dest, 8, 8, &warn);
+    CHECK(r == JOB_OK && warn.count == 0,
+          "a disabled band with an impossible limit must not warn, got %u", warn.count);
+}
+
+/* ============================================================
  * main
  * ============================================================ */
 
@@ -1532,6 +1775,10 @@ int main(void)
     test_smu_proto();
     test_smu_pack();
     test_smu_link();
+    test_job_template_machine_fields_survive();
+    test_job_check_unit_mismatch();
+    test_job_check_schema_version();
+    test_job_check_reachability();
 
     printf("\n===================================\n");
     printf("passed: %d   failed: %d\n", g_pass, g_fail);

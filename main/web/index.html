@@ -121,6 +121,9 @@ button.btn.danger{background:var(--alarm);color:#fff}
 canvas{width:100%;height:280px;display:block}
 .status{font-size:13px;min-height:18px;margin-top:8px}
 .status.ok{color:var(--ok)} .status.err{color:var(--alarm)}
+/* "succeeded, but look at this" — the job-apply case where unreachable bands
+   were warned about but the load went through. */
+.status.warn{color:var(--warn)}
 .hint{font-size:12.5px;color:var(--text-faint);margin:6px 0 0;line-height:1.5}
 progress{width:100%;height:8px}
 
@@ -253,6 +256,7 @@ progress{width:100%;height:8px}
   <button class="active" data-tab="dashboard">Dashboard</button>
   <button data-tab="trends">Trends</button>
   <button data-tab="thresholds">Thresholds</button>
+  <button data-tab="jobs">Jobs</button>
   <button data-tab="calibration">Calibration</button>
   <button data-tab="smu">SMU status</button>
   <button data-tab="comms">Comms</button>
@@ -347,6 +351,47 @@ progress{width:100%;height:8px}
       <div class="btnrow">
         <button class="btn" onclick="saveThresholds()">Save thresholds</button>
         <span class="status" id="th-status"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-jobs" class="tab">
+    <div class="card">
+      <h2>Saved jobs</h2>
+      <p class="hint">A job holds every threshold, cut-detect level and wear
+        setting for both spindles — but never this machine's calibration, so a
+        job saved here can be loaded on a different machine without disturbing
+        its sensor setup.</p>
+
+      <div class="btnrow" style="margin-top:12px">
+        <button class="btn" onclick="saveJobPrompt()">Save current as job…</button>
+        <button class="btn ghost" onclick="$('job-import-file').click()">Import from file…</button>
+        <input type="file" id="job-import-file" accept=".json,application/json"
+               style="display:none" onchange="importJobFile(this)">
+        <span class="status" id="job-status"></span>
+      </div>
+
+      <div id="job-list" style="margin-top:14px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Copy between spindles</h2>
+      <p class="hint">For when both spindles run the same kind of job. Copies
+        the job settings only — each spindle keeps its own calibration, because
+        each has its own CT and pressure sensor.</p>
+      <div class="row" style="border:none;padding-top:12px">
+        <div class="field" style="max-width:160px">
+          <label for="copy-from">From</label>
+          <select id="copy-from"></select>
+        </div>
+        <div class="field" style="max-width:160px">
+          <label for="copy-to">To</label>
+          <select id="copy-to"></select>
+        </div>
+      </div>
+      <div class="btnrow">
+        <button class="btn" onclick="copySpindle()">Copy settings</button>
+        <span class="status" id="copy-status"></span>
       </div>
     </div>
   </section>
@@ -732,6 +777,7 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'system') loadSystem();
     if (b.dataset.tab === 'calibration') loadCalib();
     if (b.dataset.tab === 'smu') loadSmuStatus();
+    if (b.dataset.tab === 'jobs') loadJobs();
   });
 });
 
@@ -778,7 +824,11 @@ function bandFillClass(pct) {
 const MARGIN_BAND_PREF = { current: [2,3,1,0], pressure: [2,3,1,0], rpm: [1,0,2,3] };
 
 function marginBand(q, cfg) {
-  if (!cfg) return null;
+  /* Guards the whole shape, not just cfg: a partial or failed /api/spindle
+     response would otherwise throw here on every poll and take the entire
+     dashboard down with it — the margin bars are a nice-to-have, the live
+     readings next to them are not. */
+  if (!cfg || !cfg.bands || !cfg.bands[q]) return null;
   for (const bi of MARGIN_BAND_PREF[q]) {
     const b = cfg.bands[q][bi];
     if (b && b.enabled) return { b, under: bi < 2 };
@@ -1316,6 +1366,214 @@ async function saveCalibration() {
     setStatus('cal-status','Saved — pushed to the SMU.','ok');
     loadSpindle();
   } catch (e) { setStatus('cal-status','Rejected: ' + e.message, 'err'); }
+}
+
+/* ---------- job templates ----------
+   A job carries thresholds/cut-detect/wear settings and deliberately NOT this
+   machine's calibration, so it can be exported and loaded elsewhere. See
+   main/job_template.h for why that split is the whole point. */
+
+async function loadJobs() {
+  let data;
+  try { data = await getJSON('/api/jobs'); }
+  catch (e) { setStatus('job-status','Job storage unavailable.','err'); return; }
+
+  fillCopySelects();
+
+  const host = $('job-list');
+  host.innerHTML = '';
+
+  if (!data.jobs || data.jobs.length === 0) {
+    const p = el('p','hint','No saved jobs yet. Set up a spindle on the '
+      + 'Thresholds tab, then use “Save current as job…” to keep it.');
+    host.appendChild(p);
+    return;
+  }
+
+  data.jobs.sort((a,b) => a.name.localeCompare(b.name));
+
+  data.jobs.forEach(j => {
+    const c = el('div','card');
+    c.style.marginBottom = '10px';
+
+    const head = el('div','row');
+    head.style.border = 'none'; head.style.paddingBottom = '6px';
+    head.appendChild(el('div', null, j.name));
+    const hv = el('div','v');
+    hv.appendChild(el('span','badge muted',
+      'spindle ' + (j.spindles || []).map(n => n + 1).join(' + ')));
+    head.appendChild(hv);
+    c.appendChild(head);
+
+    if (j.notes) c.appendChild(el('p','hint', j.notes));
+    const stamp = [j.saved_at, j.saved_by].filter(Boolean).join(' · ');
+    if (stamp) c.appendChild(el('p','hint', 'Saved ' + stamp));
+
+    const row = el('div','btnrow');
+    (j.spindles || []).forEach(src => {
+      for (let tgt = 0; tgt < NSPINDLE; tgt++) {
+        const b = el('button','btn' + (src === tgt ? '' : ' ghost'),
+          src === tgt ? ('Load → Spindle ' + (tgt+1))
+                      : ('Load S' + (src+1) + ' → Spindle ' + (tgt+1)));
+        b.onclick = () => applyJob(j.name, src, tgt);
+        row.appendChild(b);
+      }
+    });
+    const exp = el('button','btn ghost','Export');
+    exp.onclick = () => exportJob(j.name);
+    row.appendChild(exp);
+    const del = el('button','btn ghost','Delete');
+    del.onclick = () => deleteJob(j.name);
+    row.appendChild(del);
+    c.appendChild(row);
+
+    host.appendChild(c);
+  });
+}
+
+function fillCopySelects() {
+  ['copy-from','copy-to'].forEach((id, which) => {
+    const s = $(id);
+    if (s.options.length) return;
+    for (let i = 0; i < NSPINDLE; i++) {
+      const name = telemetry ? telemetry.spindles[i].name : ('Spindle ' + (i+1));
+      s.appendChild(new Option(name, i));
+    }
+    s.value = which;   /* default: from spindle 1 -> to spindle 2 */
+  });
+}
+
+/* Renders the warning list the device returns after an apply. These are
+   bands that cannot behave sensibly on THIS machine's hardware — worth
+   showing prominently, because the operator is standing at a stopped
+   machine and can still act on them. */
+function jobWarningText(w) {
+  const qty = w.quantity.charAt(0).toUpperCase() + w.quantity.slice(1);
+  if (w.kind === 'never trips') {
+    return `${qty} ${w.band} limit ${w.limit} can never be reached on this `
+         + `machine (max ${w.machine_max}) — that band will never trip.`;
+  }
+  return `${qty} ${w.band} limit ${w.limit} is beyond this machine's range `
+       + `(max ${w.machine_max}) — that band will trip constantly.`;
+}
+
+function showJobResult(statusId, res, okMsg) {
+  const warns = res.warnings || [];
+  if (warns.length === 0) {
+    setStatus(statusId, okMsg, 'ok');
+    return;
+  }
+  setStatus(statusId, okMsg + ' — with ' + warns.length + ' warning'
+    + (warns.length > 1 ? 's' : ''), 'warn');
+  alert('Loaded, but check these bands:\n\n'
+    + warns.map(w => '• ' + jobWarningText(w)).join('\n\n')
+    + (res.warnings_truncated ? '\n\n(more warnings were not listed)' : ''));
+}
+
+async function applyJob(name, from, target) {
+  if (!confirm(`Load “${name}” (spindle ${from+1} settings) into spindle `
+             + `${target+1}?\n\nThis replaces that spindle's thresholds, `
+             + `cut detection and wear settings. Its calibration is not `
+             + `touched.`)) return;
+
+  setStatus('job-status','Loading…');
+  try {
+    const res = await postJSON(
+      `/api/jobs/apply?name=${encodeURIComponent(name)}&spindle=${target}&from=${from}`);
+    showJobResult('job-status', res, `Loaded into spindle ${target+1}`);
+    refreshSpindleCfgCache();
+    loadSpindle();
+  } catch (e) { setStatus('job-status','Rejected: ' + e.message, 'err'); }
+}
+
+async function copySpindle() {
+  const from = Number($('copy-from').value), to = Number($('copy-to').value);
+  if (from === to) {
+    setStatus('copy-status','Pick two different spindles.','err');
+    return;
+  }
+  if (!confirm(`Copy spindle ${from+1}'s job settings to spindle ${to+1}?\n\n`
+             + `Spindle ${to+1} keeps its own calibration.`)) return;
+
+  setStatus('copy-status','Copying…');
+  try {
+    const res = await postJSON(`/api/jobs/copy?from=${from}&to=${to}`);
+    showJobResult('copy-status', res, `Copied to spindle ${to+1}`);
+    refreshSpindleCfgCache();
+    loadSpindle();
+  } catch (e) { setStatus('copy-status','Rejected: ' + e.message, 'err'); }
+}
+
+async function saveJobPrompt() {
+  const name = prompt('Job name (letters, numbers, spaces, - _ . only):');
+  if (!name) return;
+  const notes = prompt('Notes (optional) — tool, material, operation:') || '';
+
+  setStatus('job-status','Saving…');
+  try {
+    await postJSON('/api/jobs?name=' + encodeURIComponent(name.trim()), {
+      notes: notes,
+      /* The device has no RTC, so the browser supplies the timestamp. */
+      saved_at: new Date().toISOString().slice(0, 16).replace('T', ' '),
+      saved_by: location.hostname || 'web UI',
+    });
+    setStatus('job-status','Saved.','ok');
+    loadJobs();
+  } catch (e) { setStatus('job-status','Rejected: ' + e.message, 'err'); }
+}
+
+async function deleteJob(name) {
+  if (!confirm(`Delete job “${name}”? This cannot be undone.`)) return;
+  setStatus('job-status','Deleting…');
+  try {
+    const r = await fetch('/api/jobs?name=' + encodeURIComponent(name),
+                          { method: 'DELETE' });
+    const j = await r.json();
+    if (j.status !== 'ok') throw new Error(j.reason || 'rejected');
+    setStatus('job-status','Deleted.','ok');
+    loadJobs();
+  } catch (e) { setStatus('job-status','Failed: ' + e.message, 'err'); }
+}
+
+/* Export downloads the exact file the device stores, so it can be carried to
+   another machine on a USB stick or emailed. */
+async function exportJob(name) {
+  try {
+    const r = await fetch('/api/jobs?name=' + encodeURIComponent(name));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const text = await r.text();
+
+    const blob = new Blob([text], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name.replace(/[^A-Za-z0-9 _.-]/g, '_') + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setStatus('job-status','Exported “' + name + '”.','ok');
+  } catch (e) { setStatus('job-status','Export failed: ' + e.message, 'err'); }
+}
+
+async function importJobFile(input) {
+  const file = input.files && input.files[0];
+  input.value = '';           /* let the same file be picked again later */
+  if (!file) return;
+
+  setStatus('job-status','Importing…');
+  try {
+    const text = await file.text();
+    const r = await fetch('/api/jobs/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: text,
+    });
+    const j = await r.json();
+    if (j.status !== 'ok') throw new Error(j.reason || 'rejected');
+    setStatus('job-status','Imported “' + (j.name || file.name) + '”.','ok');
+    loadJobs();
+  } catch (e) { setStatus('job-status','Import failed: ' + e.message, 'err'); }
 }
 
 /* ---------- calibration wizard ---------- */

@@ -31,6 +31,7 @@
 #include "app_config.h"
 #include "board.h"
 #include "config_store.h"
+#include "job_store.h"
 #include "modbus.h"
 #include "monitor.h"
 #include "trend.h"
@@ -148,6 +149,17 @@ void app_main(void)
     ESP_ERROR_CHECK(trend_start());
     ESP_ERROR_CHECK(wifi_init(cfg));
     ESP_ERROR_CHECK(modbus_init(cfg));
+
+    /* Job template storage, before web_init() since the HTTP handlers use it.
+     * Deliberately NOT wrapped in ESP_ERROR_CHECK: a jobs partition that
+     * fails to mount costs the operator a convenience feature, and must not
+     * abort a boot that would otherwise go on to monitor the machine
+     * correctly. job_store_ready() lets the API report the degradation
+     * honestly instead. */
+    if (job_store_init() != ESP_OK) {
+        ESP_LOGW(TAG, "job templates unavailable — monitoring is unaffected");
+    }
+
     ESP_ERROR_CHECK(web_init(cfg));
 
     xTaskCreatePinnedToCore(self_confirm_task, "confirm", 3072, NULL,

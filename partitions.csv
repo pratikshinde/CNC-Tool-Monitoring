@@ -26,6 +26,18 @@ factory_cal,  data, nvs,      0x12000,   0x4000,
 ota_0,        app,  ota_0,    0x20000,   0x200000,
 # 2 MB
 ota_1,        app,  ota_1,    0x220000,  0x200000,
-# 512 KB gzipped SPA (UI-R2 budget 250 KB). Everything past this to the end
-# of flash (~11.4 MB) is presently unallocated.
+# 512 KB gzipped SPA (UI-R2 budget 250 KB).
 web,          data, littlefs, 0x420000,  0x80000,
+# 512 KB of saved job templates (~100+ at ~3 KB each), job_store.c.
+#
+# Deliberately NOT stored in the `web` partition above, for two reasons: that
+# one is mounted read-only, and more importantly it is the OTA-updatable UI
+# partition — pushing a new UI would erase every template an operator had
+# saved. Customer data does not belong in a partition that gets replaced.
+#
+# Added to the table BEFORE the feature strictly needs it, on purpose: the
+# partition table cannot be updated over OTA, so it needs a physical reflash.
+# That costs nothing today (no units are in the field) and would mean
+# recalling or hand-flashing every unit later. Everything past this to the
+# end of flash (~10.9 MB) remains unallocated, so this is easily grown.
+jobs,         data, littlefs, 0x4A0000,  0x80000,

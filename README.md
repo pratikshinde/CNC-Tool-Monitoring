@@ -1,62 +1,61 @@
-# CNC Tool Monitor
+# CNC Tool Monitor V2
 
 Two-spindle CNC tool condition monitor. Measures spindle current (CT),
 spindle pressure (4–20 mA / 0–10 V) and spindle speed (pulse input), and
 drives alarm outputs to a PLC when a tool wears, breaks or crashes.
 
-**Target:** ESP32 (16 MB flash) · ESP-IDF v6.0.2 · standalone, no cloud
+**V2 is a distributed architecture, not a single ESP32 doing everything.**
+Two dedicated per-spindle MCUs own the entire safety path — acquisition,
+arming, threshold evaluation, PLC output — with no network, no I²C
+transaction and no other processor in the loop. The ESP32 owns networking,
+the web UI and configuration authority, but has no say in whether a given
+sample trips an alarm. See [`FIRMWARE_DESIGN_SPEC.md`](FIRMWARE_DESIGN_SPEC.md)
+for the full reasoning and [`SMU_HARDWARE_REQUIREMENTS.md`](SMU_HARDWARE_REQUIREMENTS.md)
+for the hardware side.
 
-Requirements and plan: [`SRS_CNC_Tool_Monitor.md`](../SRS_CNC_Tool_Monitor.md) ·
-[`ROADMAP_CNC_Tool_Monitor.md`](../ROADMAP_CNC_Tool_Monitor.md) *(both referenced,
-neither exists in this repo yet — known gap)*
+| Image | Runs on | Count | Responsibility |
+|---|---|---|---|
+| **SMU firmware** | Nuvoton M2003FC1AE | 2 (one per spindle) | Acquisition, alarm evaluation, PLC fault signalling — the entire safety path. Separate project: `CNC Tool Monitoring V2 SMU` |
+| **Master firmware** (this repo) | ESP32, 16 MB flash | 1 | Networking, web UI, config authority, Modbus, OTA — no safety path |
 
-**Hardware redesign in progress:** acquisition and PLC fault-signalling are
-moving off the ESP32 onto two dedicated per-spindle MCUs (Nuvoton M031FB0AE).
-See [`SMU_HARDWARE_REQUIREMENTS.md`](SMU_HARDWARE_REQUIREMENTS.md) for the full
-spec — this is a hardware change, not yet reflected in the firmware described
-below.
+**Target:** ESP32 · ESP-IDF v6.0.2 · standalone, no cloud
 
 ---
 
 ## Status
 
-Phase 1–3 core is implemented: configuration, drivers, spindle state
-machine, alarm engine and digital output mapping. Networking (WiFi,
-Modbus RTU/TCP), a multi-tab web UI (dashboard, live trend graph,
-thresholds, guided calibration, comms, system/OTA) and browser-upload OTA
-are all implemented. On-device data logging has been **dropped** — see
-below — and the full Phase 4 Material UI SPA remains unbuilt.
+The V1→V2 migration is complete: local acquisition (`ads1115.c`, `analog.c`,
+`rpm.c`, `dio.c`, `do_map.c`) has been removed from this image entirely — the
+ESP32 no longer touches a sensor or an output. All measurement and alarm
+data now arrives from the two SMUs over I²C and is aggregated for the UI,
+Modbus and OTA layers built in V1.
 
 | Area | State |
 |---|---|
-| Config store with known-good rollback | done |
-| ADS1115 / analogue acquisition | done, bench-verified, see accuracy caveat below |
-| RPM via PCNT | done, bench-verified (tachometer cross-check pending) |
-| Digital I/O with safe-state and pulse stretching | done |
-| Spindle state machine | done, host-tested |
-| Alarm engine: bands, delays, hysteresis, latching | done, host-tested |
-| Breakage / crash / wear-trend detection | done, host-tested, **defaults unvalidated** |
-| Digital output mapping | done, host-tested |
+| Config store (NVS) with known-good rollback | done |
+| SMU link: I²C protocol, telemetry/ident aggregation | done, host-tested against a fake transport |
+| Software SMU stand-in (`smu_mock.c`) for development without hardware | done — default until real SMU hardware exists (`CONFIG_SMU_USE_MOCK`) |
+| Real I²C transport (`smu_i2c_transport.c`) | done, compiles clean, **unverified against hardware** — no SMU board exists yet |
 | WiFi (station + always-on fallback AP) | done |
-| Modbus RTU (RS485) + Modbus TCP, read-only telemetry registers | done |
-| Guided 2-point calibration (pressure) + 1-point + auto-zero (current) | done |
-| No-load current deadband | done |
-| Web UI: dashboard, trends, thresholds, calibration, comms, system | done, not the Phase 4 SPA |
-| OTA: browser-upload firmware update, project/version checked | done |
-| On-device data logging | **dropped** — flash budget does not support it |
+| Modbus RTU (RS485) + Modbus TCP, read-only telemetry registers | done — see [`MODBUS_REGISTER_MAP.md`](MODBUS_REGISTER_MAP.md) |
+| Guided calibration (2-point pressure, 1-point current, auto-zero) | done — pushes results to the target SMU over I²C |
+| Job templates: save/load/export/import/copy full spindle setups | done, host-tested — see below |
+| Web UI: dashboard, trends, thresholds, jobs, calibration, SMU status, comms, system | done — gzipped SPA served from its own LittleFS partition, independently OTA-updatable |
+| OTA: browser-upload firmware update, project/version checked, automatic rollback | done |
+| On-device data logging | **not implemented, by design** — see `FIRMWARE_DESIGN_SPEC.md` §1.1 |
 
-**Compiles clean against ESP-IDF v6.0.2.** `idf.py build` passes with zero
-warnings on a full rebuild of the `main` component.
+**Compiles clean against ESP-IDF v6.0.2** under both `CONFIG_SMU_USE_MOCK`
+settings. `idf.py build` passes with zero warnings on a full rebuild.
 
-### Data logging has been dropped
+### The device is a monitor, not a historian
 
-On-device logging to a `logs` LittleFS partition (originally LG-R1…R7) is
-no longer planned: the flash budget doesn't support holding a useful
-amount of history. The 5-minute RAM trend buffer (`trend.c`) covers "what
-just happened" on the dashboard; it does not survive a reboot and is not a
-replacement for durable history. If long-term trending is needed later, it
-belongs off-device — pull it over Modbus/TCP into a PLC or historian —
-rather than on this flash.
+Configuration (calibration, thresholds, network settings, job templates)
+persists; everything the device *observes* — measurements, alarm state,
+latches, cycle counters, the learned wear baseline — is volatile and lost on
+power loss, by design. Customers who need history log it externally over
+Modbus. See `FIRMWARE_DESIGN_SPEC.md` §1.1 for the full reasoning and the
+consequences that follow from it (counters are "since power-on", the wear
+baseline relearns every boot, etc.).
 
 ---
 
@@ -70,9 +69,19 @@ idf.py build
 idf.py -p COMx flash monitor
 ```
 
-`sdkconfig.defaults` sets the 16 MB flash size, the custom partition
-table and OTA rollback. Delete any stale `sdkconfig` before the first
-build so the defaults are picked up.
+`sdkconfig.defaults` sets the 16 MB flash size, the custom partition table
+and OTA rollback. Delete any stale `sdkconfig` before the first build so the
+defaults are picked up.
+
+`CONFIG_SMU_USE_MOCK` (menuconfig, under this component) selects between the
+software SMU stand-in and the real I²C transport. Mock is the default — it
+lets the full stack (web UI, Modbus, alarms, jobs) be developed and tested
+with no SMU hardware attached. Flip it once real SMU boards exist.
+
+**A partition table change needs a physical reflash, not OTA.** If a unit is
+already in the field, changing `partitions.csv` (adding the `jobs`
+partition, for instance) requires connecting to it directly — OTA only
+replaces the app image, not the partition layout.
 
 ### Host tests
 
@@ -84,8 +93,12 @@ make
 ```
 
 Covers scaling arithmetic, config validation, the spindle state machine,
-alarm delays/hysteresis/latching, sensor-fault isolation, breakage and
-crash detection, wear trend, and output mapping.
+alarm delays/hysteresis/latching (including behaviour across the `uint32_t`
+millisecond wrap), sensor-fault isolation, breakage/crash/wear-trend
+detection, the SMU wire protocol and config pack/unpack, `smu_link.c`
+against a fake transport, and the job-template extract/apply/check logic —
+the last of these including the round-trip guarantee that an apply never
+touches a machine's calibration (see Job templates, below).
 
 ---
 
@@ -93,171 +106,123 @@ crash detection, wear trend, and output mapping.
 
 ```
 main/
-  board.h          pin map, channel assignment, task/core layout
-  app_config.[ch]  config schema, defaults, validation      (pure, tested)
-  config_store.[ch] NVS persistence with known-good fallback
-  scaling.[ch]     volts -> engineering units                (pure, tested)
-  ads1115.[ch]     I2C ADC driver
-  analog.[ch]      current burst-RMS + pressure acquisition
-  rpm.[ch]         PCNT-based speed measurement
-  dio.[ch]         digital I/O, safe state, pulse stretching
-  spindle_sm.[ch]  operating state machine                   (pure, tested)
-  alarm.[ch]       thresholds and transient detection        (pure, tested)
-  do_map.[ch]      alarm state -> output demands             (pure, tested)
-  monitor.[ch]     the real-time task
-  wifi.[ch]        STA + always-on fallback AP
-  modbus.[ch]      Modbus RTU (RS485) and TCP slaves, read-only registers
-  calib.[ch]       guided field calibration (2-point pressure, 1-point CT, auto-zero)
-  trend.[ch]       5-minute RAM ring buffer for the live graph (not persisted)
-  ota.[ch]         browser-upload firmware update into the spare OTA slot
-  web.[ch]         HTTP server: dashboard/trend/threshold/calibration/comms/
-                   system API, ~15 routes
-  web/index.html   the multi-tab operator UI (embedded in firmware)
-  main.c           bring-up
-host_test/         gcc test harness
+  board.h              pin map, task/core layout
+  app_config.[ch]       ESP32-root config aggregate: WiFi, Modbus, both
+                        spindles' spindle_cfg_t                (tested)
+  config_store.[ch]     NVS persistence with known-good fallback
+  smu_link.[ch]         I2C protocol logic, no transport dependency (tested)
+  smu_mock.c            software SMU stand-in — the default until hardware exists
+  smu_i2c_transport.c   the real I2C master transport
+  monitor.[ch]          polls both SMUs, aggregates telemetry for consumers
+  wifi.[ch]             STA + always-on fallback AP
+  modbus.[ch]           Modbus RTU (RS485) and TCP slaves, read-only registers
+  calib.[ch]             guided field calibration, pushed to the SMU over I2C
+  trend.[ch]             5-minute RAM ring buffer for the live graph (not persisted)
+  ota.[ch]               browser-upload firmware update into the spare OTA slot
+  job_template.[ch]      job/machine field split + cross-machine validation (tested)
+  job_store.[ch]         job template CRUD on the `jobs` LittleFS partition
+  web.[ch]               HTTP server + API — ~20 routes across telemetry,
+                         config, calibration, jobs, OTA, system
+  web/index.html         the multi-tab operator UI, gzipped into the `web`
+                         LittleFS partition at build time
+  main.c                 bring-up
+components/
+  smu_shared/            portable C compiled verbatim into BOTH this image
+                         and the SMU firmware: alarm.c, spindle_sm.c,
+                         scaling.c, spindle_config.c, smu_crc16.c, smu_pack.c
+host_test/                gcc test harness — no ESP-IDF, no hardware
 ```
 
-Anything marked *pure* has no ESP-IDF dependency and takes time as an
-argument rather than reading a clock, so it runs deterministically on a
-host. That is deliberate: the delay, hysteresis and latch interactions in
-`alarm.c` are the kind of logic that looks obviously correct and is not.
+Anything under `components/smu_shared/` or marked *tested* above has no
+ESP-IDF dependency and takes time as a `uint32_t` millisecond argument
+rather than reading a clock, so it runs deterministically on a host. That is
+deliberate: the delay, hysteresis and latch interactions in `alarm.c`, and
+the job/machine field split in `job_template.c`, are exactly the kind of
+logic that looks obviously correct and is not.
+
+---
+
+## Job templates
+
+A saved job template captures everything about a cutting operation —
+thresholds, cut-detect levels, wear-detection settings — and can be
+reloaded in one action, exported to a file, and applied on a **different**
+machine or a different spindle.
+
+The design's one hard rule: a template can never carry this machine's
+**calibration** (CT ratio, gain corrections, sensor ranges, zero-offset
+tare). `job_profile_t` — the struct a template is built from — has no field
+that could hold a calibration value, so there is nothing for the apply path
+to accidentally overwrite even if someone tried. Applying a template checks
+compatibility against the destination spindle's hardware (unit mismatch is
+a hard refusal; an unreachable band is a warning, since apply is already
+blocked while that spindle is cutting) and always leaves the destination's
+own calibration untouched.
+
+`test_job_template_machine_fields_survive()` in `host_test/test_main.c` is
+the guarantee in test form: it builds two machines with deliberately
+different CT ratings and sensor ranges, applies a template across them, and
+asserts every calibration field is byte-identical afterward. It must not be
+deleted or weakened.
+
+Storage is its own `jobs` LittleFS partition (`partitions.csv`), separate
+from the `web` partition that holds the UI — a UI OTA update replaces that
+partition wholesale, and customer-saved templates must survive it.
 
 ---
 
 ## Three things to know before trusting this on a machine
 
-### 1. Current accuracy is limited by the ADS1115, not by the code
+### 1. The real SMU I²C transport is unverified — no hardware exists yet
 
-The board feeds the raw CT burden voltage into an ADS1115 whose maximum
-aggregate throughput is 860 SPS — about 17 samples per 50 Hz cycle with a
-channel dedicated, and 4.3 with all four active. That is far below what a
-single-cycle RMS needs.
-
-The driver compensates by averaging over many cycles. The default
-128-sample burst spans ~149 ms and gives roughly 2% error **on a clean
-sine wave**. A VFD-driven spindle is not a clean sine wave, and harmonics
-above ~430 Hz alias straight into the reading, so real-world accuracy will
-be worse.
-
-Two consequences:
-
-- Per-spindle current updates arrive at roughly 3 Hz, not 10 Hz.
-- **Breakage detection cannot meet its 100 ms specification.** One burst
-  is longer than that window, so detection works burst-to-burst with a
-  real window nearer 300–400 ms.
-
-The full trade-off table is in the header comment of `analog.c`. The fix
-is external RMS-to-DC conditioning (SRS decision HW-D1); `analog.h` is
-already shaped so that swapping the current source does not disturb
-anything above it.
+`smu_i2c_transport.c` compiles clean and implements the same
+`smu_transport_t` interface `smu_mock.c` does, but has never talked to a
+real M2003FC1AE. The SMU PCB is still in layout. Everything downstream —
+telemetry aggregation, alarms, calibration push, jobs — has been developed
+and tested against the mock. Bench verification (SMU Phase 7 in the
+companion firmware project) is blocked on hardware, not code.
 
 ### 2. The wear-detection defaults are placeholders
 
-`breakage_drop_pct = 40`, `crash_rise_pct = 60`, `adaptive_k_warn = 3` and
-the rest are engineering starting points, not validated values. They must
-be tuned against real cutting data during the Phase 6 field trial. Wear
-trend detection ships disabled for the same reason.
+`breakage_drop_pct`, `crash_rise_pct`, `adaptive_k_warn` and the rest are
+engineering starting points, not validated values. They must be tuned
+against real cutting data once hardware exists to generate it.
 
-### 3. The SRS debounce requirement is wrong and the code does not follow it
+### 3. No authentication on the web UI
 
-SRS AI-R11 asks for 0–5 ms of configurable input debounce. The PCNT
-glitch filter is clocked from the 80 MHz APB bus with a 10-bit threshold,
-so its ceiling is 12.8 µs — three orders of magnitude short.
-
-More importantly, 5 ms of debounce would impose a 200 Hz pulse ceiling,
-capping measurable speed at 12 000 RPM with a 1 PPR sensor. The
-requirement is wrong for the application, not merely unimplementable.
-`rpm.c` clamps to 12 µs and logs when it does. **AI-R11 should be amended.**
+OTA upload, job import/export, config and calibration writes are all
+unauthenticated HTTP. Anyone who can reach the device on the network can
+reflash it or change its thresholds. Decide on an authentication story
+before this goes on a shop network the customer doesn't fully control.
 
 ---
 
 ## Design decisions worth knowing
 
+**The safety path fits entirely inside one SMU.** No code path that asserts
+or clears a PLC fault output may block on, or read state produced by, the
+ESP32. A WiFi outage, a reboot, or a firmware update in progress on the
+ESP32 never leaves a spindle unprotected.
+
 **Monitoring is armed only in the CUTTING state.** Spindle start-up draws
 several times the cutting current and an idle spindle at speed still draws
-windage. Evaluating thresholds unconditionally would trip an alarm on
-every cycle, and a monitor that cries wolf gets disconnected. This single
-rule is the most important false-alarm defence in the product, and it is
-why the state machine exists at all.
+windage. Evaluating thresholds unconditionally would trip an alarm on every
+cycle, and a monitor that cries wolf gets disconnected. This runs on the
+SMU, not the ESP32 — it is part of the safety path.
 
 **A faulted sensor raises a diagnostic, never a process alarm.** A broken
 4–20 mA loop reads 0 bar, which is below any sensible LoLo limit. Without
 isolation, every wiring fault would present as a critical process alarm.
-`alarm_update()` gates each quantity independently on its sensor status.
 
-**Acknowledging an active alarm does not silence it.** It is recorded as
-acknowledged, but the latch only releases once the condition has actually
-cleared.
+**A job template structurally cannot carry calibration.** See Job
+templates, above — this is the same design instinct as sensor-fault
+isolation, applied to a different failure mode: make the dangerous state
+impossible to represent, rather than trusting a check to catch it every
+time.
 
-**Alarms are evaluated in the measurement task, not a separate one.** A
-queue between them would add a scheduling hop inside the 200 ms latency
-budget and buy nothing — the evaluation is pure arithmetic on data that
-was just produced. The real-time loop is pinned to core 0 so Wi-Fi and
-HTTP on core 1 cannot delay it.
-
-**Outputs are held in their safe state until the first complete
-measurement cycle**, and the system-healthy output is inverted by default
-so that a fault, a broken wire and a dead device all read alike to the
-PLC.
-
----
-
-## Next steps
-
-1. **Fix the pressure burden resistor** (180 Ω → 100 Ω) — see Hardware
-   notes. This is the highest-priority open item: it's a fault-detection
-   gap on hardware currently on the bench, not a someday cleanup.
-2. Cross-check RPM against a tachometer — CT, pressure and RPM are bench-
-   verified, but RPM showed minor variation worth confirming independently.
-3. Characterise the analogue noise floor **with the VFD running** — this
-   is the measurement that decides whether HW-D1 needs resolving before
-   anything else proceeds.
-4. Decide on authentication for the web UI before it goes on a shop
-   network — OTA upload means anyone who can reach the device can reflash
-   it, and there is currently no login.
-5. The full Material UI SPA (Phase 4) — the current web UI is a hand-
-   written multi-tab page, not the dashboard the roadmap describes.
-
----
-
-## Hardware notes
-
-- **ADS1115 Channel Assignment**:
-  - `AIN0` -> Spindle 1 Current (CT1)
-  - `AIN1` -> Spindle 1 Pressure (4–20 mA)
-  - `AIN2` -> Spindle 2 Current (CT2)
-  - `AIN3` -> Spindle 2 Pressure (4–20 mA)
-- **CT Current Measurement**:
-  - Configured for **30:1** CT ratio (30 A primary / 1 A secondary).
-  - Fitted burden resistor: **0.1 Ω** with an opamp gain stage.
-  - CT reference bias voltage: nominal **1.65 V**.
-- **Pressure Measurement — known issue, not yet resolved**:
-  - 4–20 mA pressure loop across a **180 Ω** burden resistor (range 0–250 bar).
-    At the full 20 mA scale that is **3.6 V**, which exceeds the ESP32's
-    3.3 V supply rail feeding the ADS1115 — the input pin sees more than
-    VDD regardless of any PGA/FSR setting.
-  - Pressure reads use `ADS_FSR_4096` (±4.096 V), which avoids the ADC
-    *digital* code saturating at max-scale, but that only hides the
-    symptom: it does not change the pin's absolute voltage limit
-    (`ads1115.h` itself documents `ADS_FSR_4096` as "not usable at 3V3").
-    A signal genuinely above VDD is an over-voltage condition on the ADC
-    input regardless of which range is selected.
-  - Consequence: the NAMUR over-range fault check in `scaling.c`
-    (`LOOP_OVER_MA = 21.0f`) cannot be trusted near or above this clipping
-    point — a shorted transmitter driving max loop current may not read as
-    a fault. The reachable top ~10% of the 250 bar range is also suspect.
-  - **Fix is a board change, not firmware**: drop the burden to 100 Ω
-    (0.4–2.0 V across the 4–20 mA range, 2.1 V at the 21 mA over-range
-    trip point — comfortably inside the 3.3 V rail with headroom) and
-    revert pressure sampling to `ADS_FSR_2048`, matching the current
-    channels.
-- DI0/DI1 are GPIO34/35, which are **input-only with no internal
-  pull-ups**. External 10 kΩ pull-ups to 3V3 are required on the PCB or
-  the pulse counter will pick up noise on a floating pin.
-- The 0–10 V divider is 80.6 kΩ / 20 kΩ.
-- Modbus RTU is wired to UART2: RXD on GPIO16, TXD on GPIO17, and the
-  RS485 transceiver's DE/RE tied together on GPIO4 (driven by the UART's
-  RTS line in half-duplex mode). Declared in `board.h`.
+**Outputs are held in their safe state until the first complete measurement
+cycle**, and the system-healthy output is inverted by default so that a
+fault, a broken wire and a dead device all read alike to the PLC.
 
 ---
 

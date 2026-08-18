@@ -37,6 +37,7 @@
 
 #include "web.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +58,8 @@
 #include "board.h"
 #include "calib.h"
 #include "config_store.h"
+#include "job_store.h"
+#include "job_template.h"
 #include "modbus.h"
 #include "monitor.h"
 #include "ota.h"
@@ -1113,6 +1116,315 @@ static esp_err_t mount_web_fs(void)
 }
 
 /* ============================================================
+ * Job templates
+ *
+ * Saved sets of job settings an operator can reload in one action, including
+ * onto a different machine. The rules about what may travel (and what must
+ * never) are job_template.[ch]'s; storage is job_store.[ch]'s. This layer is
+ * HTTP plumbing plus the two guards that belong at the point of application:
+ * refusing to load a job into a spindle that is mid-cut, and surfacing
+ * unreachable-band warnings to the operator.
+ * ============================================================ */
+
+/* Percent-decode in place. httpd_query_key_value() does NOT decode, so a
+ * template named "Acme bracket" arrives as "Acme%20bracket" — which would
+ * then fail job_store's filename allowlist on the '%' and look like a
+ * mysterious rejection of a perfectly ordinary name. */
+static void url_decode(char *s)
+{
+    char *w = s;
+    for (char *r = s; *r; r++) {
+        if (*r == '+') {
+            *w++ = ' ';
+        } else if (*r == '%' && isxdigit((unsigned char)r[1]) &&
+                                isxdigit((unsigned char)r[2])) {
+            char hex[3] = { r[1], r[2], '\0' };
+            *w++ = (char)strtol(hex, NULL, 16);
+            r += 2;
+        } else {
+            *w++ = *r;
+        }
+    }
+    *w = '\0';
+}
+
+/* Fetch and decode a string query parameter, e.g. ?name=Acme%20bracket.
+ * The query buffer is sized for a full-length name plus the other parameters
+ * that can accompany it. */
+static bool query_str(httpd_req_t *req, const char *key, char *out, size_t out_size)
+{
+    char query[256];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return false;
+    }
+    if (httpd_query_key_value(query, key, out, out_size) != ESP_OK) {
+        return false;
+    }
+    url_decode(out);
+    return out[0] != '\0';
+}
+
+static cJSON *warnings_to_json(const job_warnings_t *w)
+{
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < w->count; i++) {
+        const job_warning_t *it = &w->item[i];
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "kind", job_warn_kind_str(it->kind));
+        cJSON_AddStringToObject(o, "quantity", quantity_str(it->qty));
+        cJSON_AddStringToObject(o, "band", band_str(it->band));
+        cJSON_AddNumberToObject(o, "limit", it->limit);
+        cJSON_AddNumberToObject(o, "machine_max", it->machine_max);
+        cJSON_AddItemToArray(arr, o);
+    }
+    return arr;
+}
+
+/* GET /api/jobs            — list every saved template
+ * GET /api/jobs?name=X     — fetch one, which is also the export path */
+static esp_err_t handle_jobs_get(httpd_req_t *req)
+{
+    if (!job_store_ready()) return send_json_error(req, "job storage unavailable");
+
+    char name[JOB_NAME_MAX];
+    if (query_str(req, "name", name, sizeof(name))) {
+        job_record_t rec;
+        esp_err_t err = job_store_load(name, &rec);
+        if (err == ESP_ERR_NOT_FOUND)   return send_json_error(req, "no such template");
+        if (err != ESP_OK)              return send_json_error(req, "template unreadable");
+
+        cJSON *root = job_record_to_json(&rec);
+        if (!root) return send_json_error(req, "out of memory");
+        return send_json(req, root);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "jobs", job_store_list());
+    return send_json(req, root);
+}
+
+/* POST /api/jobs?name=X — capture both spindles' current settings.
+ * Body carries notes/saved_at/saved_by; the browser supplies the timestamp
+ * because this device has no RTC. */
+static esp_err_t handle_jobs_post(httpd_req_t *req)
+{
+    if (!job_store_ready()) return send_json_error(req, "job storage unavailable");
+
+    char name[JOB_NAME_MAX];
+    if (!query_str(req, "name", name, sizeof(name))) {
+        return send_json_error(req, "template name required");
+    }
+
+    job_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    str_copy_bounded(meta.name, sizeof(meta.name), name);
+
+    char *body = read_body(req);
+    if (body) {
+        cJSON *root = cJSON_Parse(body);
+        free(body);
+        if (root) {
+            cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "notes");
+            if (cJSON_IsString(it)) str_copy_bounded(meta.notes, sizeof(meta.notes), it->valuestring);
+            it = cJSON_GetObjectItemCaseSensitive(root, "saved_at");
+            if (cJSON_IsString(it)) str_copy_bounded(meta.saved_at, sizeof(meta.saved_at), it->valuestring);
+            it = cJSON_GetObjectItemCaseSensitive(root, "saved_by");
+            if (cJSON_IsString(it)) str_copy_bounded(meta.saved_by, sizeof(meta.saved_by), it->valuestring);
+            cJSON_Delete(root);
+        }
+    }
+
+    job_record_t rec;
+    job_record_capture(config_get(), &meta, &rec);
+
+    esp_err_t err = job_store_save(&rec);
+    if (err == ESP_ERR_INVALID_ARG) return send_json_error(req, "invalid template name");
+    if (err != ESP_OK)              return send_json_error(req, "could not save (storage full?)");
+
+    return send_status_ok(req);
+}
+
+static esp_err_t handle_jobs_delete(httpd_req_t *req)
+{
+    if (!job_store_ready()) return send_json_error(req, "job storage unavailable");
+
+    char name[JOB_NAME_MAX];
+    if (!query_str(req, "name", name, sizeof(name))) {
+        return send_json_error(req, "template name required");
+    }
+
+    esp_err_t err = job_store_delete(name);
+    if (err == ESP_ERR_INVALID_ARG) return send_json_error(req, "invalid template name");
+    if (err != ESP_OK)              return send_json_error(req, "no such template");
+
+    return send_status_ok(req);
+}
+
+/* POST /api/jobs/import — accept a template file exported from another
+ * machine and store it. Validation against THIS machine happens at apply
+ * time, not here: a template can legitimately be kept on a machine it does
+ * not currently fit (a different sensor could be fitted later), and refusing
+ * the import would lose the file entirely. */
+static esp_err_t handle_jobs_import_post(httpd_req_t *req)
+{
+    if (!job_store_ready()) return send_json_error(req, "job storage unavailable");
+
+    char *body = read_body(req);
+    if (!body) return ESP_OK;
+
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root) return send_json_error(req, "invalid JSON");
+
+    job_record_t rec;
+    esp_err_t err = job_record_from_json(root, &rec);
+    cJSON_Delete(root);
+    if (err != ESP_OK) {
+        return send_json_error(req, "not a job template file");
+    }
+
+    /* An imported file may carry a name that would not be a legal filename
+     * here, or none at all — say so plainly rather than writing something
+     * the operator did not choose. */
+    if (rec.meta.name[0] == '\0') {
+        return send_json_error(req, "template file has no name");
+    }
+
+    err = job_store_save(&rec);
+    if (err == ESP_ERR_INVALID_ARG) {
+        return send_json_error(req, "template name has characters this device cannot store");
+    }
+    if (err != ESP_OK) return send_json_error(req, "could not save (storage full?)");
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "status", "ok");
+    cJSON_AddStringToObject(resp, "name", rec.meta.name);
+    return send_json(req, resp);
+}
+
+/* Shared tail for both apply and copy: guard, check, apply, commit, reply.
+ * `ctx` is NULL for a same-machine copy — see job_check(). */
+static esp_err_t apply_profile_to_spindle(httpd_req_t *req,
+                                          const job_profile_t *profile,
+                                          const job_context_t *ctx,
+                                          uint16_t schema_version,
+                                          uint8_t target)
+{
+    /* Guard 1: never swap a job into a spindle that is mid-cut. Changing
+     * every threshold under a running tool is almost always a mistake, and
+     * unlike a single threshold tweak there is no plausible reason to do it
+     * without stopping first. This also underwrites the decision to let
+     * unreachable-band warnings through rather than block on them: because
+     * apply only happens on a stopped spindle, a human is always present at
+     * the machine when a warning appears. */
+    monitor_snapshot_t snap;
+    monitor_get_snapshot(&snap);
+    if (snap.spindle[target].state == SPINDLE_CUTTING) {
+        return send_json_error(req,
+            "spindle is cutting — stop it before loading a job");
+    }
+
+    const app_config_t *live = config_get();
+
+    /* Guard 2: compatibility with THIS machine's hardware. */
+    job_warnings_t warn;
+    job_check_result_t chk = job_check(profile, ctx, &live->spindle[target],
+                                       schema_version, CONFIG_SCHEMA_VERSION,
+                                       &warn);
+    if (chk != JOB_OK) {
+        return send_json_error(req, job_check_result_str(chk));
+    }
+
+    app_config_t working;
+    config_get_copy(&working);
+    job_profile_apply(profile, &working.spindle[target]);
+
+    cfg_result_t reason = CFG_OK;
+    esp_err_t err = config_store_commit(&working, &reason);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "job apply rejected: %s", app_config_result_str(reason));
+        return send_json_error(req, app_config_result_str(reason));
+    }
+
+    /* Same propagation path every other config write uses — this is what
+     * carries the new thresholds down to the SMU. */
+    monitor_config_changed();
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "status", "ok");
+    cJSON_AddItemToObject(resp, "warnings", warnings_to_json(&warn));
+    cJSON_AddBoolToObject(resp, "warnings_truncated", warn.truncated);
+    return send_json(req, resp);
+}
+
+/* POST /api/jobs/apply?name=X&spindle=N[&from=M]
+ *
+ * `from` selects which of the template's spindle profiles to use, so an
+ * operation authored on spindle 0 can be applied to spindle 1 when the same
+ * job moves sides. Omitted, each profile goes to its own index. */
+static esp_err_t handle_jobs_apply_post(httpd_req_t *req)
+{
+    if (!job_store_ready()) return send_json_error(req, "job storage unavailable");
+
+    char name[JOB_NAME_MAX];
+    if (!query_str(req, "name", name, sizeof(name))) {
+        return send_json_error(req, "template name required");
+    }
+
+    uint8_t target;
+    if (!spindle_from_query(req, &target)) {
+        return send_json_error(req, "bad spindle index");
+    }
+
+    job_record_t rec;
+    esp_err_t err = job_store_load(name, &rec);
+    if (err == ESP_ERR_NOT_FOUND) return send_json_error(req, "no such template");
+    if (err != ESP_OK)            return send_json_error(req, "template unreadable");
+
+    uint32_t from = target;
+    (void)query_uint(req, "from", &from);
+    if (from >= NUM_SPINDLES)  return send_json_error(req, "bad source spindle");
+    if (!rec.present[from])    return send_json_error(req,
+                                   "this template has no settings for that spindle");
+
+    return apply_profile_to_spindle(req, &rec.profile[from], &rec.context[from],
+                                    rec.schema_version, target);
+}
+
+/* POST /api/jobs/copy?from=N&to=M
+ *
+ * For when both spindles run the same kind of job. Deliberately routed
+ * through the same extract/check/apply path as a template rather than a
+ * struct copy: spindle 2 has its own CT and its own pressure sensor with
+ * their own gain corrections, so copying the whole spindle_cfg_t would skew
+ * every reading on that side — the identical silent-wrongness bug as a
+ * cross-machine import, just inside one machine. */
+static esp_err_t handle_jobs_copy_post(httpd_req_t *req)
+{
+    uint32_t from = 0, to = 0;
+    if (!query_uint(req, "from", &from) || !query_uint(req, "to", &to)) {
+        return send_json_error(req, "from and to spindle required");
+    }
+    if (from >= NUM_SPINDLES || to >= NUM_SPINDLES) {
+        return send_json_error(req, "bad spindle index");
+    }
+    if (from == to) {
+        return send_json_error(req, "source and target are the same spindle");
+    }
+
+    const app_config_t *live = config_get();
+    job_profile_t profile;
+    job_profile_extract(&live->spindle[from], &profile);
+
+    /* NULL context: both spindles are on one machine and share a pressure
+     * unit by construction, so there is nothing to cross-check. Reachability
+     * warnings are still produced, which matters when the two sides have
+     * different CT ratings or sensor spans. */
+    return apply_profile_to_spindle(req, &profile, NULL,
+                                    CONFIG_SCHEMA_VERSION, (uint8_t)to);
+}
+
+/* ============================================================
  * Public API
  * ============================================================ */
 
@@ -1126,9 +1438,17 @@ esp_err_t web_init(const app_config_t *cfg)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size      = STACK_WEB;
     config.core_id         = CORE_NETWORK;
-    /* Default is 8 and we register more than that; without this the extra
-     * routes fail to register and return 404 at runtime. */
-    config.max_uri_handlers = 20;
+    /* Default is 8 and we register far more than that; without this the
+     * extra routes fail to register and return 404 at runtime — a failure
+     * that does not show up at build time, only as a mysteriously missing
+     * endpoint. The static assert below is what makes that impossible to
+     * reintroduce: adding a route without raising this number now breaks the
+     * build instead of one API call.
+     *
+     * 32 rather than exactly the current count so ordinary growth does not
+     * require touching this line; each slot is a small struct in the httpd
+     * control block, not a per-connection cost. */
+    config.max_uri_handlers = 32;
     /* A firmware upload is ~1 MB over WiFi and can stall briefly; the
      * default 5 s would abort a perfectly good update. */
     config.recv_wait_timeout = 20;
@@ -1157,10 +1477,24 @@ esp_err_t web_init(const app_config_t *cfg)
         { .uri = "/api/calib",         .method = HTTP_POST, .handler = handle_calib_post },
         { .uri = "/api/autozero",      .method = HTTP_POST, .handler = handle_autozero_post },
         { .uri = "/api/acknowledge",   .method = HTTP_POST, .handler = handle_acknowledge_post },
+        { .uri = "/api/jobs",          .method = HTTP_GET,    .handler = handle_jobs_get },
+        { .uri = "/api/jobs",          .method = HTTP_POST,   .handler = handle_jobs_post },
+        { .uri = "/api/jobs",          .method = HTTP_DELETE, .handler = handle_jobs_delete },
+        { .uri = "/api/jobs/apply",    .method = HTTP_POST,   .handler = handle_jobs_apply_post },
+        { .uri = "/api/jobs/copy",     .method = HTTP_POST,   .handler = handle_jobs_copy_post },
+        { .uri = "/api/jobs/import",   .method = HTTP_POST,   .handler = handle_jobs_import_post },
         { .uri = "/api/ota",           .method = HTTP_POST, .handler = handle_ota_post },
         { .uri = "/api/reboot",        .method = HTTP_POST, .handler = handle_reboot_post },
         { .uri = "/api/factory-reset", .method = HTTP_POST, .handler = handle_factory_reset_post },
     };
+
+    /* Registering more routes than max_uri_handlers allows fails at RUNTIME,
+     * per-route, as a 404 on whichever endpoints did not fit — it builds
+     * cleanly and looks like a missing feature rather than a configuration
+     * error. This catches it at compile time instead. */
+    _Static_assert(sizeof(routes) / sizeof(routes[0]) <= 32,
+                   "more routes than config.max_uri_handlers allows — raise both");
+
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         ESP_ERROR_CHECK(httpd_register_uri_handler(server, &routes[i]));
     }

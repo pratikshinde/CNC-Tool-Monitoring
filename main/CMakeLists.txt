@@ -41,6 +41,8 @@ idf_component_register(
          "calib.c"
          "trend.c"
          "ota.c"
+         "job_template.c"
+         "job_store.c"
     INCLUDE_DIRS "."
     REQUIRES smu_shared
              esp_driver_i2c

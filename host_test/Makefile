@@ -35,6 +35,7 @@ LDFLAGS := -lm
 SRCS := test_main.c \
         ../main/app_config.c \
         ../main/smu_link.c \
+        ../main/job_template.c \
         ../components/smu_shared/spindle_config.c \
         ../components/smu_shared/scaling.c \
         ../components/smu_shared/spindle_sm.c \
