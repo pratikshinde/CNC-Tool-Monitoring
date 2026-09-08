@@ -76,10 +76,18 @@ static const char *TAG = "analog";
                                        * of a lower data rate is free
                                        * noise rejection */
 
+/* Minimum time between bus-recovery attempts once the ADC has been marked
+ * unhealthy — see analog_try_recover(). A wedged bus is not worth
+ * re-testing on every single read call: that's needless bus traffic, and
+ * if the cause is still active (a WiFi TX burst, in the field case this
+ * was written for) it is a retry storm that cannot succeed yet anyway. */
+#define RECOVERY_MIN_INTERVAL_US   (2 * 1000 * 1000)
+
 static i2c_master_bus_handle_t s_bus;
 static ads1115_t              *s_adc;
 static SemaphoreHandle_t       s_adc_mutex;
 static bool                    s_healthy;
+static int64_t                 s_last_recovery_attempt_us;
 
 /* Per-spindle measured DC bias, refreshed by auto-zero. Seeded at init
  * from the stored calibration (current.zero_offset_v) so a tare performed
@@ -102,6 +110,12 @@ esp_err_t analog_init(const app_config_t *cfg)
 {
     s_adc_mutex = xSemaphoreCreateMutex();
     if (!s_adc_mutex) return ESP_ERR_NO_MEM;
+
+    /* Seeded negative (not 0) so a fault in the first RECOVERY_MIN_INTERVAL_US
+     * of uptime is not mistaken for "we just tried" and skipped — exactly
+     * the window the bus lockup that motivated this code showed up in
+     * (~1.1 s after boot, while WiFi was still bringing up the AP). */
+    s_last_recovery_attempt_us = -RECOVERY_MIN_INTERVAL_US;
 
     /* Restore the stored zero reference. A bias of zero means the field has
      * never been written (a fresh config), so keep the board nominal rather
@@ -149,6 +163,70 @@ bool analog_is_healthy(void)
 }
 
 /* ============================================================
+ * Recovery
+ *
+ * Field build: an I2C bus lockup was observed ~1.1 s after boot, timed
+ * right as WiFi finished bringing up the fallback AP (DHCP server up,
+ * then "I2C bus is still busy but software timeout detected" followed by
+ * GPIO 21/22 "not usable, maybe conflict with others" as the driver's own
+ * internal stuck-bus handling tripped over pins it already owned). Most
+ * likely cause: WiFi radio TX transients coupling onto a bus that only has
+ * the ESP32's weak internal pull-ups at 400 kHz (see board.h) — a hardware
+ * fix (external 2.2-4.7k pull-ups) is the real cure, but the bug this
+ * function closes is a SEPARATE one: before this, s_healthy was set true
+ * exactly once, at init, and nothing ever attempted to clear a fault —
+ * one transient glitch anywhere in a boot latched adc:FAIL for the rest
+ * of it, regardless of whether the bus recovered on its own a second
+ * later.
+ * ============================================================ */
+
+/* Attempt to bring the ADC back into service after an I2C fault.
+ *
+ * i2c_master_bus_reset() is the ESP-IDF-native recovery primitive: it
+ * toggles SCL to force a slave that's holding SDA low to release it, then
+ * issues a STOP. That is the only thing that can actually unstick a wedged
+ * bus. A successful reset only proves the wires are free, not that the
+ * ADS1115 is behaving — a genuinely dead or unplugged chip would also let
+ * the wires float free — so health is restored only after a full
+ * ads1115_probe() succeeds too, exactly the same bar analog_init() uses.
+ *
+ * Rate-limited via RECOVERY_MIN_INTERVAL_US so a bus that stays down does
+ * not get hammered by every read call across both spindles, and does not
+ * fill the log with an attempt per call. Safe to call whenever s_healthy
+ * is false; a no-op (after the rate-limit check) otherwise-adjacent
+ * callers don't need to reason about. */
+static void analog_try_recover(void)
+{
+    xSemaphoreTake(s_adc_mutex, portMAX_DELAY);
+
+    int64_t now = esp_timer_get_time();
+    if (now - s_last_recovery_attempt_us < RECOVERY_MIN_INTERVAL_US) {
+        xSemaphoreGive(s_adc_mutex);
+        return;
+    }
+    s_last_recovery_attempt_us = now;
+
+    esp_err_t err = i2c_master_bus_reset(s_bus);
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_adc_mutex);
+        ESP_LOGW(TAG, "I2C bus recovery failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = ads1115_probe(s_adc);
+    xSemaphoreGive(s_adc_mutex);
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "I2C bus reset ok, but ADS1115 still not responding: %s",
+                 esp_err_to_name(err));
+        return;
+    }
+
+    s_healthy = true;
+    ESP_LOGI(TAG, "ADS1115 recovered — I2C bus back in service");
+}
+
+/* ============================================================
  * Current — burst RMS
  * ============================================================ */
 
@@ -158,6 +236,15 @@ esp_err_t analog_read_current(uint8_t spindle, const current_cfg_t *cfg,
     if (spindle >= NUM_SPINDLES || !cfg || !out) return ESP_ERR_INVALID_ARG;
 
     memset(out, 0, sizeof(*out));
+
+    /* A wedged bus does not clear itself. Try recovery before spending a
+     * whole burst window (~150 ms) on a transaction that would just fail
+     * again — see analog_try_recover(). */
+    if (!s_healthy) analog_try_recover();
+    if (!s_healthy) {
+        out->status = SENSOR_OPEN;
+        return ESP_ERR_INVALID_STATE;
+    }
 
     const uint16_t n = cfg->rms_burst_samples;
     const uint8_t  ch = k_current_ch[spindle];
@@ -244,6 +331,9 @@ esp_err_t analog_autozero(uint8_t spindle, float *measured_bias_v)
 {
     if (spindle >= NUM_SPINDLES) return ESP_ERR_INVALID_ARG;
 
+    if (!s_healthy) analog_try_recover();
+    if (!s_healthy) return ESP_ERR_INVALID_STATE;
+
     const uint8_t ch = k_current_ch[spindle];
     const uint32_t period_us = ads1115_period_us(BURST_SPS);
     const int n = 256;   /* long window: the point is a stable mean */
@@ -297,6 +387,12 @@ esp_err_t analog_read_pressure(uint8_t spindle, const pressure_cfg_t *cfg,
 
     memset(out, 0, sizeof(*out));
 
+    if (!s_healthy) analog_try_recover();
+    if (!s_healthy) {
+        out->status = SENSOR_OPEN;
+        return ESP_ERR_INVALID_STATE;
+    }
+
     int16_t raw;
     xSemaphoreTake(s_adc_mutex, portMAX_DELAY);
     esp_err_t err = ads1115_read_single(s_adc, k_pressure_ch[spindle],
@@ -321,6 +417,9 @@ esp_err_t analog_read_pressure(uint8_t spindle, const pressure_cfg_t *cfg,
 esp_err_t analog_read_raw(uint8_t ads_channel, int16_t *raw)
 {
     if (ads_channel > 3 || !raw) return ESP_ERR_INVALID_ARG;
+
+    if (!s_healthy) analog_try_recover();
+    if (!s_healthy) return ESP_ERR_INVALID_STATE;
 
     xSemaphoreTake(s_adc_mutex, portMAX_DELAY);
     esp_err_t err = ads1115_read_single(s_adc, ads_channel,
